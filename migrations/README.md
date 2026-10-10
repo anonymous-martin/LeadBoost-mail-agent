@@ -20,7 +20,13 @@ an earlier script's column existing), so use the order below.
 
 ## Canonical order
 
-Run once, in this order, against a fresh or partially-migrated database:
+Run once, in this order, against a database whose tables already exist (created
+by `init_db()` -- which the API/worker run at every start -- or by an earlier
+migration run). **Step 1 fails on a database with no tables** (`relation
+"campaigns" does not exist`); `scripts/migrate_release.sh` runs `init_db()` first
+for that reason. A database that only ever ran `init_db()` is *not* equivalent to
+a migrated one: it lacks, for example, `uq_messages_inbound_message_id` and the
+work-queue indexes.
 
 1. `001_production_hardening.py` -- organization_id + timezone on
    campaigns, unique constraints, indexes, send-attempt tracking fields.
@@ -139,7 +145,37 @@ intentional-by-accident (two different concerns both landed on "002" at
 different times) rather than a real ordering conflict -- all three are
 idempotent and safe to run in the order listed above regardless.
 
-## Running
+## Release procedure (operator-run, guarded)
+
+Use `scripts/migrate_release.sh` rather than typing the commands below by hand.
+The application's `DATABASE_URL` setting silently defaults to a local SQLite
+file, so a hand-run script with the variable missing "succeeds" against nothing.
+Migrations are never run by the API or the worker; run them as a one-off
+release step, **before** deploying code that needs the new schema.
+
+1. **Back up** the target database and verify the backup restores.
+2. Suspend the Mailer **worker** and let it drain (see
+   `docs/C13_DEPLOYMENT_RUNBOOK.md`, "Pause / resume"). Do not use
+   `LIVE_SENDING_ENABLED=false` to pause: it FAILs queued dispatches.
+3. Export the target (never printed in full by the tool):
+   `export DATABASE_URL='postgresql://...'`
+4. `scripts/migrate_release.sh --status` -- read-only schema-marker report.
+5. `scripts/migrate_release.sh --check-only` -- every guard, no changes.
+6. `MIGRATE_CONFIRM_BACKUP=I_HAVE_A_VERIFIED_BACKUP_OF_<database name> scripts/migrate_release.sh`
+7. Deploy the new API and worker revision together, then resume the worker.
+
+The tool refuses a missing/SQLite/non-PostgreSQL URL, an unacknowledged apply,
+and (migration 007) an upgrade that would strand non-terminal dispatches. It
+stops at the first failing step, keeps that step's exit status, never runs a
+downgrade, and prints only `host:port/database`.
+
+**Migration 007 -- drain first.** If `external_dispatches.mailbox_id` does not
+exist yet, any dispatch still `queued`/`generating`/`sending` when the
+mailbox-aware code goes live is failed pre-SMTP as `no_mailbox`. The tool
+blocks (exit 4) until none remain; it never edits or deletes them. If the column
+already exists the check is informational only.
+
+## Running (reference: what the wrapper executes)
 
 ```
 python migrations/001_production_hardening.py
