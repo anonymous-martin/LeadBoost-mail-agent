@@ -62,6 +62,14 @@ services:
     plan: starter            # background workers are not available on the free tier
     buildCommand: pip install -r requirements.txt
     startCommand: python worker.py
+    # worker.py drains in-flight external dispatches for up to
+    # EXTERNAL_DISPATCH_SHUTDOWN_DRAIN_SECONDS (25 s by default), then moves any
+    # it still owns SENDING -> UNKNOWN and releases claims. Render's default grace
+    # after SIGTERM is 30 s, leaving ~5 s of margin; 60 s makes the ordered
+    # shutdown the normal path instead of a race against SIGKILL. (A SIGKILL
+    # mid-drain is still safe -- lease recovery resolves expired SENDING to
+    # UNKNOWN, never QUEUED -- but it is avoidable.)
+    maxShutdownDelaySeconds: 60
     envVars:
       - key: DATABASE_URL
         fromDatabase:

@@ -141,6 +141,19 @@ jobs:
             tests/test_leadboost_reconciliation_postgres.py \
             tests/test_leadboost_conversation_postgres.py -v
 
+      # C13: the REAL scripts/migrate_release.sh and the REAL migration scripts,
+      # run against a database the test creates and drops itself
+      # (mailer_migrate_test_<random> on this job's own service container).
+      # REQUIRE_MIGRATION_WRAPPER_PG=1 turns a missing/unreachable PostgreSQL
+      # into a hard failure -- this step can never "pass" by skipping.
+      - name: Migration wrapper against disposable PostgreSQL
+        env:
+          POSTGRES_TEST_URL: postgresql+psycopg2://mailer_agent:mailer_agent_test_pw@localhost:5432/mailer_agent_test
+          REQUIRE_MIGRATION_WRAPPER_PG: "1"
+        run: |
+          bash -n scripts/migrate_release.sh
+          python -m pytest -o addopts="" tests/test_migrate_release.py -v
+
   local-smtp:
     name: Local SMTP protocol integration
     runs-on: ubuntu-latest
