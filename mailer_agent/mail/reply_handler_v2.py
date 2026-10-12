@@ -109,11 +109,37 @@ def _normalize_message_id(value: str | None) -> str | None:
     return v
 
 
-def process_inbound_email_v2(db: Session, email_in: InboundEmail) -> dict:
+def _scope_messages_to_org(query, organization_id: str | None):
+    """
+    Restrict a ``Message`` query to rows owned by ``organization_id`` (Message -> Contact ->
+    Campaign.organization_id). ``organization_id=None`` returns the query UNCHANGED: that is
+    the deliberate, trusted-internal behaviour of the legacy deployment-global IMAP poller
+    only. Any caller acting on behalf of an authenticated tenant must pass that tenant's id.
+    """
+    if organization_id is None:
+        return query
+    return (
+        query.join(Contact, Message.contact_id == Contact.id)
+        .join(Campaign, Contact.campaign_id == Campaign.id)
+        .filter(Campaign.organization_id == organization_id)
+    )
+
+
+def process_inbound_email_v2(db: Session, email_in: InboundEmail, *, organization_id: str | None) -> dict:
     """
     Enhanced inbound email processing with semantic intelligence.
     
     Returns dict with processing result.
+
+    ``organization_id`` is REQUIRED (keyword-only, no default) so that no caller can be
+    unscoped by omission:
+      * a ``str`` -- the authenticated tenant (webhook): every lookup (duplicate check,
+        threading-header correlation, e-mail fallback, post-IntegrityError recovery) is
+        restricted to that tenant's campaigns. Something that belongs to another tenant
+        behaves exactly like "not found": ``{"matched": False, ...}`` with no foreign
+        identifier in the result, and no foreign record is read into the response or modified.
+      * ``None`` -- the legacy deployment-global IMAP poller only (trusted internal input,
+        single-tenant by design): unscoped, exactly the behaviour before C15.1b.
 
     This is the one convergence point for both inbound channels
     (api/webhooks.py and the IMAP poll job in followup/scheduler.py both
@@ -139,9 +165,12 @@ def process_inbound_email_v2(db: Session, email_in: InboundEmail) -> dict:
 
     # Step 1: Deduplicate by Message-ID
     if email_in.message_id:
-        existing = db.query(Message).filter(
-            Message.message_id_header == email_in.message_id,
-            Message.direction == MessageDirection.INBOUND.value
+        existing = _scope_messages_to_org(
+            db.query(Message).filter(
+                Message.message_id_header == email_in.message_id,
+                Message.direction == MessageDirection.INBOUND.value
+            ),
+            organization_id,
         ).first()
         
         if existing:
@@ -156,7 +185,18 @@ def process_inbound_email_v2(db: Session, email_in: InboundEmail) -> dict:
             }
     
     # Step 2: Correlate to contact
-    contact = _find_contact_by_message_id(db, email_in) or _find_contact_by_email(db, email_in)
+    # An explicit thread reference that cannot be resolved in this tenant
+    # must not fall back to matching a shared sender address.
+    thread_reference_present = bool(
+        email_in.in_reply_to or email_in.references
+    )
+    contact = _find_contact_by_message_id(
+        db, email_in, organization_id
+    )
+    if contact is None and not thread_reference_present:
+        contact = _find_contact_by_email(
+            db, email_in, organization_id
+        )
     
     if not contact:
         logger.info(
@@ -203,10 +243,19 @@ def process_inbound_email_v2(db: Session, email_in: InboundEmail) -> dict:
             "already-handled, not an error.",
             email_in.message_id,
         )
-        existing = db.query(Message).filter(
-            Message.message_id_header == email_in.message_id,
-            Message.direction == MessageDirection.INBOUND.value
+        existing = _scope_messages_to_org(
+            db.query(Message).filter(
+                Message.message_id_header == email_in.message_id,
+                Message.direction == MessageDirection.INBOUND.value
+            ),
+            organization_id,
         ).first()
+        if organization_id is not None and existing is None:
+            # The global uniqueness constraint fired because the Message-ID is already held by a
+            # row this tenant cannot see (another tenant's). Behave as "not found": no foreign
+            # contact_id / message id in the result, and nothing of theirs was touched.
+            logger.info("Inbound Message-ID already recorded outside this organization; treated as unmatched.")
+            return {"matched": False, "from_email": email_in.from_email}
         return {
             "matched": True,
             "contact_id": existing.contact_id if existing else contact.id,
@@ -573,8 +622,11 @@ def _correlate_mailbox_inbound(
     return None, _UNMATCHED
 
 
-def _find_contact_by_message_id(db: Session, email_in: InboundEmail) -> Contact | None:
-    """Find contact by threading headers (reliable method)."""
+def _find_contact_by_message_id(
+    db: Session, email_in: InboundEmail, organization_id: str | None
+) -> Contact | None:
+    """Find contact by threading headers (reliable method). Restricted to ``organization_id``'s
+    campaigns when it is not None (see process_inbound_email_v2)."""
     candidate_ids = set()
     if email_in.in_reply_to:
         candidate_ids.add(email_in.in_reply_to)
@@ -584,8 +636,10 @@ def _find_contact_by_message_id(db: Session, email_in: InboundEmail) -> Contact 
         return None
     
     msg = (
-        db.query(Message)
-        .filter(Message.message_id_header.in_(candidate_ids))
+        _scope_messages_to_org(
+            db.query(Message).filter(Message.message_id_header.in_(candidate_ids)),
+            organization_id,
+        )
         .order_by(Message.created_at.desc())
         .first()
     )
@@ -593,7 +647,9 @@ def _find_contact_by_message_id(db: Session, email_in: InboundEmail) -> Contact 
     return msg.contact if msg else None
 
 
-def _find_contact_by_email(db: Session, email_in: InboundEmail) -> Contact | None:
+def _find_contact_by_email(
+    db: Session, email_in: InboundEmail, organization_id: str | None
+) -> Contact | None:
     """
     Find contact by email address (fallback method, used only when
     threading-header correlation in _find_contact_by_message_id fails).
@@ -619,17 +675,20 @@ def _find_contact_by_email(db: Session, email_in: InboundEmail) -> Contact | Non
         Contact.status != ContactStatus.SUPPRESSED.value,
     )
 
+    if organization_id is not None or email_in.to_email:
+        query = query.join(Campaign, Contact.campaign_id == Campaign.id)
+    if organization_id is not None:
+        # Authenticated tenant: only its own campaigns are ever candidates, so the ambiguity
+        # check below is evaluated within that tenant.
+        query = query.filter(Campaign.organization_id == organization_id)
+
     if email_in.to_email:
-        from mailer_agent.models import Campaign
         # to_email scopes this to (at most) one organization before we
         # pick among its contacts, so a most-recently-updated tiebreaker
         # here is choosing among that ONE org's own re-contacts of the
         # same address (e.g. a re-run campaign) -- not guessing across
         # tenants.
-        query = (
-            query.join(Campaign, Contact.campaign_id == Campaign.id)
-            .filter(Campaign.sender_email == email_in.to_email)
-        )
+        query = query.filter(Campaign.sender_email == email_in.to_email)
         return query.order_by(Contact.updated_at.desc()).first()
 
     # No to_email available: we cannot resolve to a specific

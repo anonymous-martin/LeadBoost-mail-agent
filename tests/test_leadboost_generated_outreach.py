@@ -240,9 +240,10 @@ def test_integration_route_fails_closed_when_no_keys_are_configured(sm, monkeypa
         for headers in ({}, {"X-API-Key": "anything"}):
             r = c.post(URL, json=_req(), headers=headers)
             assert r.status_code == 503
-        # Existing behaviour elsewhere is unchanged: the read-only reconciliation
-        # route is still open in an unconfigured (local dev) deployment.
-        assert c.get(f"{EXACT_URL}/does-not-exist").status_code == 404
+        # C15.1: the legacy exact-message reconciliation route is no longer open in an
+        # unconfigured deployment (this assertion used to expect 404, i.e. pinned the fail-open
+        # behaviour). It now fails closed like the rest of the integration surface.
+        assert c.get(f"{EXACT_URL}/does-not-exist").status_code == 503
     finally:
         app.dependency_overrides.clear()
     assert fake_llm.call_count == 0 and _counts(sm) == EMPTY

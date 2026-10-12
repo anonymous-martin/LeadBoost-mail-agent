@@ -67,12 +67,24 @@ Both sides must agree per organization: the key LeadBoost sends for org X must
 map, on the Mailer, to the org id the Mailer holds mailboxes for. The Mailer
 derives the organization **from the key**, never from a request body.
 
-If **no** keys are effective (empty/invalid `ORG_KEY_MAP`, no `API_KEY`, no
-`ORG_KEYS_*`), the human-operated routes (campaigns, contacts, messages,
-webhooks, system) are **unauthenticated**; only the integration and mailbox
-routes fail closed (503). An invalid-JSON `ORG_KEY_MAP` is logged and ignored;
-valid JSON that is not an object crashes the API at import. `check_config.py`
-reports all three. Fixing this in code is C15.
+**Fail closed (C15.1, applies from the revision that contains it).** If no keys
+are effective (empty `ORG_KEY_MAP`, no `API_KEY`, no `ORG_KEYS_*`) every
+protected route answers 503 and the API **refuses to start**. A malformed
+`ORG_KEY_MAP` (invalid JSON, JSON that is not an object, or entries that are not
+non-empty string pairs) rejects the whole authentication configuration the same
+way: nothing is ignored, the legacy key is not used as a fallback, and the
+startup error never contains key values. `ALLOW_INSECURE_NO_AUTH=true` is the only
+opt-out: local development only, ignored whenever any key is configured,
+refused together with `LIVE_SENDING_ENABLED=true`, and never honoured by the
+integration or mailbox routes. Never set it on a deployed service.
+**Before deploying that revision, confirm in the dashboard that the API service
+has at least one valid key source** (`ORG_KEY_MAP`, `ORG_KEYS_*` or `API_KEY`);
+otherwise the new revision fails its start-up check and does not come up
+(confirm in the deploy logs and Render's deploy behaviour that the previous
+revision keeps serving). `check_config.py
+--role api` reports every case. Legacy `API_KEY` semantics are unchanged: it is
+still accepted on every route, including the integration and mailbox routes, as
+org `default`.
 
 Safe verification after a key change (read-only, no send): from a trusted shell,
 `GET https://<mailer-host>/mailboxes` with `X-API-Key: <key>` should return 200
@@ -80,6 +92,27 @@ for a valid key and 401/403 for a wrong key, and `GET /system/health` (authentic
 organisation-scoped, queries the database) should return 200. Both prove TLS +
 key mapping + database reachability **for the API only**; they say nothing about
 the worker. Rotation/revocation procedure is C15/C16.
+
+### Inbound webhook (`POST /webhooks/inbound-email`) -- tenant scoping (C15.1b)
+
+From the revision that contains C15.1b the webhook resolves the tenant **from the
+presented key** (fail-closed: 401 for a missing/unknown key, 503 when no keys are
+configured) and restricts every lookup -- duplicate check, threading-header
+correlation, e-mail fallback and the post-`IntegrityError` recovery -- to that
+organization's campaigns. A reply that references another tenant's thread, or a
+`Message-ID` another tenant already holds, is answered `{"matched": false, ...}`
+with no identifier and nothing is written. The global uniqueness constraint on
+inbound `Message-ID` is unchanged.
+
+**Compatibility -- an operator decision is required before deploying.** Whether a
+live inbound-parse provider (Postmark/Mailgun/SendGrid) posts to this endpoint,
+and which key it sends, is a dashboard fact this repository cannot show. A key now
+reaches only the campaigns of the organization it maps to. A provider that sends
+the legacy `API_KEY` (org `default`) will no longer match campaigns owned by any
+other organization; give it a key mapped to the owning organization (or stop using
+the webhook for that tenant). Do not "fix" this by loosening the scoping. The
+deployment-global legacy IMAP poll is deliberately unscoped (trusted internal
+input) and is unchanged; the per-mailbox IMAP path is separate and unchanged.
 
 ## 4. `MAILBOX_ENCRYPTION_KEY`
 
@@ -199,7 +232,7 @@ resuming a worker after a failed migration.
 | Worker SIGTERM ordered drain, `SENDING -> UNKNOWN` | Implemented; covered by existing `tests/test_external_dispatch_scheduler_shutdown.py`; **not** observed on a deployed service |
 | `render.yaml` correctness, live service settings, deployed HTTPS, worker liveness, live key agreement | **Not verified** (dashboard-only / C14) |
 
-Deferred: C14 -- deployed HTTPS/worker E2E with disposable SMTP/IMAP. C15 -- runtime
-fail-closed auth, `/health` and `/docs` exposure, worker liveness, key rotation,
+Deferred: C14 -- deployed HTTPS/worker E2E with disposable SMTP/IMAP. C15 -- deployed
+verification of the C15.1 fail-closed auth change, `/health` and `/docs` exposure, worker liveness, key rotation,
 rate limits, per-tenant sender identity, `UNKNOWN`/`DISPATCH_FAILED` remedy
 policy, automated migrations.

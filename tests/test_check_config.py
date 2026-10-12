@@ -63,9 +63,21 @@ def test_malformed_org_key_map_fails_and_never_crashes(bad, tmp_path):
     assert "Traceback" not in out
 
 
-def test_no_keys_at_all_is_reported_as_open_routes(tmp_path):
+def test_no_keys_at_all_fails_closed_and_is_reported_as_a_failure(tmp_path):
     rc, out = run(tmp=tmp_path, drop=("ORG_KEY_MAP",))
-    assert rc == 1 and "UNAUTHENTICATED" in out
+    assert rc == 1 and "refuses to start" in out and "503" in out
+    assert "UNAUTHENTICATED" not in out
+
+
+def test_insecure_opt_out_with_no_keys_is_a_failure_in_a_deployment_preflight(tmp_path):
+    rc, out = run(tmp=tmp_path, drop=("ORG_KEY_MAP",), ALLOW_INSECURE_NO_AUTH="true")
+    assert rc == 1 and "UNAUTHENTICATED" in out and "Never on a deployed service" in out
+
+
+def test_insecure_opt_out_alongside_real_keys_warns_it_is_ignored(tmp_path):
+    rc, out = run(tmp=tmp_path, ALLOW_INSECURE_NO_AUTH="true")
+    assert rc == 0, out
+    assert "ALLOW_INSECURE_NO_AUTH" in out and "ignored" in out
 
 
 def test_legacy_api_key_alongside_org_key_map_warns(tmp_path):

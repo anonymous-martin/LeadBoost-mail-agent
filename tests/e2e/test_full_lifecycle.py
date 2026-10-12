@@ -42,7 +42,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from mailer_agent.api.deps import get_current_org_id, require_api_key
+from mailer_agent.api.deps import get_current_org_id, get_integration_org_id, require_api_key
 from mailer_agent.api.main import app
 from mailer_agent.db import get_db
 from mailer_agent.followup.engine import send_initial_outreach
@@ -99,6 +99,9 @@ def client(e2e_session):
     app.dependency_overrides[get_db] = lambda: e2e_session
     app.dependency_overrides[require_api_key] = lambda: None
     app.dependency_overrides[get_current_org_id] = lambda: "e2e-test-org"
+    # C15.1b: the inbound webhook resolves its tenant through the fail-closed integration
+    # dependency; this lifecycle test (not an auth test) pins it to the same org.
+    app.dependency_overrides[get_integration_org_id] = lambda: "e2e-test-org"
     try:
         yield TestClient(app)
     finally:

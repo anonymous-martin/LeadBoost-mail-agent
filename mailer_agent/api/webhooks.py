@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from mailer_agent.api.deps import require_api_key
+from mailer_agent.api.deps import get_integration_org_id, require_api_key
 from mailer_agent.db import get_db
 from mailer_agent.mail.imap_reader import InboundEmail
 from mailer_agent.mail.reply_handler import process_inbound_email
@@ -59,7 +59,13 @@ class InboundEmailWebhook(BaseModel):
 
 
 @router.post("/inbound-email")
-def receive_inbound_email(payload: InboundEmailWebhook, db: Session = Depends(get_db)):
+def receive_inbound_email(
+    payload: InboundEmailWebhook,
+    # C15.1b: the tenant is the one the presented key maps to (fail-closed variant: 503 when
+    # no keys are configured, 401 for a missing/unknown key) -- never anything in the payload.
+    org_id: str = Depends(get_integration_org_id),
+    db: Session = Depends(get_db),
+):
     email_in = InboundEmail(
         from_email=payload.from_email.strip().lower(),
         subject=payload.subject or "",
@@ -70,7 +76,7 @@ def receive_inbound_email(payload: InboundEmailWebhook, db: Session = Depends(ge
         to_email=payload.to_email,  # Pass through for tenant resolution
         auto_submitted=payload.auto_submitted,
     )
-    result = process_inbound_email(db, email_in)
+    result = process_inbound_email(db, email_in, organization_id=org_id)
     db.commit()
     logger.info("Webhook inbound processed for %s: %s", email_in.from_email, result)
     return result
