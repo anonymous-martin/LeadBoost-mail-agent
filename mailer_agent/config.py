@@ -113,7 +113,13 @@ class Settings(BaseSettings):
     # Single legacy key (maps to org "default"). For multi-tenant use,
     # prefer ORG_KEY_MAP (JSON) or individual ORG_KEYS_<org_id>=<key> vars
     # -- see mailer_agent/api/deps.py for the full resolution order.
-    api_key: str = ""  # if set, required as `X-API-Key` header on all routes
+    api_key: str = ""  # if set, accepted as `X-API-Key` (org "default") on all routes
+    # C15.1: authentication fails CLOSED. With no keys at all (API_KEY, ORG_KEY_MAP and ORG_KEYS_*
+    # all empty) the API refuses to start and every protected route answers 503. This is the ONLY
+    # opt-out: LOCAL DEVELOPMENT ONLY, ignored when any key is configured, refused at startup
+    # together with LIVE_SENDING_ENABLED=true, and never honoured by the integration or mailbox
+    # routes. Default off; never set it on a deployed service.
+    allow_insecure_no_auth: bool = False
 
     # --- Mailbox credential encryption (M1) --------------------------------
     # Fernet key (urlsafe-base64, 32 bytes) used to encrypt mailbox SMTP/IMAP

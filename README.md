@@ -118,7 +118,7 @@ Full interactive docs are auto-served at `/docs` (Swagger) once running. Summary
 | `POST /webhooks/inbound-email` | Production-recommended reply intake — see "Reply monitoring" below |
 | `GET /health` | Liveness + current safety-toggle state |
 
-If `API_KEY` is set in the environment, every route above requires header `X-API-Key: <value>`.
+Every route above except `GET /health` requires an `X-API-Key` header. Authentication fails closed: with no key configured (`API_KEY`, `ORG_KEY_MAP` or `ORG_KEYS_*`) the API refuses to start, and a malformed `ORG_KEY_MAP` is rejected rather than ignored. Local development without a key requires the explicit `ALLOW_INSECURE_NO_AUTH=true` opt-in (see `.env.example`).
 
 ### Example: creating and starting a campaign
 

@@ -120,7 +120,7 @@ def test_inbound_reply_with_known_inbox_resolves_to_correct_org(db_session):
         to_email="alice@org-a.example.com",  # received at Org A's inbox
     )
 
-    result = process_inbound_email_v2(db_session, email_in)
+    result = process_inbound_email_v2(db_session, email_in, organization_id=None)
 
     assert result["matched"] is True
     assert result["contact_id"] == contact_a.id, (
@@ -139,7 +139,7 @@ def test_inbound_reply_with_known_inbox_resolves_to_correct_org(db_session):
         references=[],
         to_email="bob@org-b.example.com",
     )
-    result_b = process_inbound_email_v2(db_session, email_in_b)
+    result_b = process_inbound_email_v2(db_session, email_in_b, organization_id=None)
     assert result_b["contact_id"] == contact_b.id
 
 
@@ -177,7 +177,7 @@ def test_inbound_reply_correlates_by_thread_header_regardless_of_email_collision
         to_email=None,  # deliberately absent -- threading header must still resolve correctly
     )
 
-    result = process_inbound_email_v2(db_session, email_in)
+    result = process_inbound_email_v2(db_session, email_in, organization_id=None)
 
     assert result["matched"] is True
     assert result["contact_id"] == contact_a.id
@@ -211,7 +211,7 @@ def test_ambiguous_correlation_is_not_guessed(db_session, caplog):
     )
 
     with caplog.at_level(logging.WARNING):
-        result = process_inbound_email_v2(db_session, email_in)
+        result = process_inbound_email_v2(db_session, email_in, organization_id=None)
 
     assert result["matched"] is False, (
         "Ambiguous correlation must be left unresolved, not guessed at -- "
@@ -263,7 +263,7 @@ def test_single_unambiguous_email_match_without_to_email_still_resolves(db_sessi
         to_email=None,
     )
 
-    result = process_inbound_email_v2(db_session, email_in)
+    result = process_inbound_email_v2(db_session, email_in, organization_id=None)
 
     assert result["matched"] is True
     assert result["contact_id"] == contact.id
@@ -317,7 +317,7 @@ def test_same_email_via_webhook_then_imap_is_deduplicated_despite_format_differe
         references=[],
         to_email="dana@dedup-test.example.com",
     )
-    result1 = process_inbound_email_v2(db_session, email_via_webhook)
+    result1 = process_inbound_email_v2(db_session, email_via_webhook, organization_id=None)
     assert result1["matched"] is True
     assert result1["action"] != "skipped_duplicate"
 
@@ -332,7 +332,7 @@ def test_same_email_via_webhook_then_imap_is_deduplicated_despite_format_differe
         references=[],
         to_email="dana@dedup-test.example.com",
     )
-    result2 = process_inbound_email_v2(db_session, email_via_imap)
+    result2 = process_inbound_email_v2(db_session, email_via_imap, organization_id=None)
 
     assert result2["matched"] is True
     assert result2["action"] == "skipped_duplicate", (

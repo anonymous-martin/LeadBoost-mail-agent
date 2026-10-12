@@ -11,7 +11,7 @@ It reports only presence, validity and shape: booleans, counts, organization
 IDs (identifiers, not credentials) and a redacted ``host:port/database``. API
 keys, the encryption key and the DSN password are never printed.
 
-It reuses the application's own parsing (``Settings``, ``deps._build_key_map``,
+It reuses the application's own parsing (``Settings``, ``deps._KEY_MAP``,
 ``mailbox_secrets``) so it cannot drift from what the service really does. It
 checks the *environment of the process it runs in*; it cannot see another
 service's dashboard, so run it once per service. It does not prove the
@@ -24,7 +24,6 @@ Exit status: 1 if any FAIL, else 0 (WARN does not fail).
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -80,32 +79,29 @@ def check_api(settings) -> None:
     else:
         _r("PASS", "RUN_SCHEDULER_IN_PROCESS", "false (the separate worker owns the scheduler)")
 
-    raw = os.environ.get("ORG_KEY_MAP", "").strip()
-    if raw:
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            _r("FAIL", "ORG_KEY_MAP", "set but not valid JSON; the API logs an error and IGNORES it")
-            parsed = None
-        else:
-            if not isinstance(parsed, dict):
-                _r("FAIL", "ORG_KEY_MAP", "valid JSON but not an object {\"<api_key>\": \"<org_id>\"}; the API would crash at import")
-                parsed = None
-            elif not all(isinstance(k, str) and isinstance(v, (str, int)) for k, v in parsed.items()):
-                _r("FAIL", "ORG_KEY_MAP", "entries must be {\"<api_key>\": \"<org_id>\"} string pairs")
     try:
-        # deps builds the map at import time (module-level _KEY_MAP), so a bad
-        # ORG_KEY_MAP can surface as an import error: report it, don't crash.
+        # deps builds the key map at import time (module-level _KEY_MAP / _AUTH_CONFIG_ERROR).
+        # Importing never raises for a bad ORG_KEY_MAP any more (C15.1), but stay defensive:
+        # report, don't crash.
         from mailer_agent.api import deps
 
         mapping = deps._KEY_MAP
+        config_error = deps._AUTH_CONFIG_ERROR
     except Exception as exc:  # noqa: BLE001
         _r("FAIL", "auth key map", f"the API would fail to start: auth configuration raised {type(exc).__name__} at import")
         return
 
-    if not mapping:
-        _r("FAIL", "auth key map", "EMPTY: the human-operated routes (campaigns, contacts, messages, webhooks, system) are UNAUTHENTICATED (dev mode); integration/mailbox routes return 503. Do not expose this API.")
+    if config_error:
+        _r("FAIL", "ORG_KEY_MAP", f"{config_error}; the API REFUSES TO START and every protected route would answer 503 (nothing is ignored or partly honoured)")
         return
+    if not mapping:
+        if settings.allow_insecure_no_auth:
+            _r("FAIL", "auth key map", "EMPTY with ALLOW_INSECURE_NO_AUTH=true: the human-operated routes are UNAUTHENTICATED (local-dev opt-out). Never on a deployed service; integration/mailbox routes still return 503")
+        else:
+            _r("FAIL", "auth key map", "EMPTY: the API refuses to start and every protected route answers 503 (fail closed). Set ORG_KEY_MAP (or ORG_KEYS_*; legacy API_KEY)")
+        return
+    if settings.allow_insecure_no_auth:
+        _r("WARN", "ALLOW_INSECURE_NO_AUTH", "set but ignored because keys are configured; unset it")
     orgs = sorted(set(mapping.values()))
     _r("PASS", "auth key map", f"{len(mapping)} key(s) mapping to org id(s): {', '.join(orgs)}")
     short = sum(1 for k in mapping if len(k) < MIN_KEY_LEN)

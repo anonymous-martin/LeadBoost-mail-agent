@@ -291,7 +291,7 @@ def test_integration_reply_is_recorded_but_never_creates_native_automation(sm, i
         iid = ik.id
         outbound_before = s.query(Message).filter_by(contact_id=iid, direction="outbound").count()
 
-        result = rh.process_inbound_email_v2(s, _reply(parent, email="lead@example.com"))
+        result = rh.process_inbound_email_v2(s, _reply(parent, email="lead@example.com"), organization_id=None)
         s.commit()
 
         assert result["matched"] is True and result["action"] == "recorded_integration_managed"
@@ -323,7 +323,7 @@ def test_integration_unsubscribe_still_suppresses(sm, monkeypatch):
         parent = _outbound_seed(s, ik)
         s.commit()
         iid = ik.id
-        rh.process_inbound_email_v2(s, _reply(parent))
+        rh.process_inbound_email_v2(s, _reply(parent), organization_id=None)
         s.commit()
         assert s.query(SuppressionEntry).count() >= 1
         assert s.get(Contact, iid).next_action_at is None
@@ -344,7 +344,7 @@ def test_ordinary_reply_behaviour_is_unchanged(sm, inbound, fake_llm, monkeypatc
         parent = _outbound_seed(s, nk)
         s.commit()
         nid = nk.id
-        result = rh.process_inbound_email_v2(s, _reply(parent))
+        result = rh.process_inbound_email_v2(s, _reply(parent), organization_id=None)
         s.commit()
         assert result["action"] != "recorded_integration_managed"
         assert fake_llm.call_count >= 1                                  # planner/responder ran

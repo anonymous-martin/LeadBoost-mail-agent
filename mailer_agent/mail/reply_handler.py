@@ -19,7 +19,7 @@ from mailer_agent.mail.reply_handler_v2 import process_inbound_email_v2
 logger = logging.getLogger("mailer_agent.mail.reply_handler")
 
 
-def process_inbound_email(db: Session, email_in: InboundEmail) -> dict:
+def process_inbound_email(db: Session, email_in: InboundEmail, *, organization_id: str | None) -> dict:
     """
     Process inbound email with full semantic intelligence.
     
@@ -30,9 +30,12 @@ def process_inbound_email(db: Session, email_in: InboundEmail) -> dict:
     - Explicit failure handling (provider failures ≠ neutral)
     - Proper timestamp tracking
     
+    ``organization_id`` is required: the authenticated tenant (webhook) or ``None`` for the
+    legacy deployment-global IMAP poller only. See process_inbound_email_v2.
+
     Returns dict with processing result.
     """
-    return process_inbound_email_v2(db, email_in)
+    return process_inbound_email_v2(db, email_in, organization_id=organization_id)
 
 
 # Backward compatibility exports

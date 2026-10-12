@@ -38,7 +38,10 @@ def poll_replies_job() -> None:
     with session_scope() as db:
         for email_in in emails:
             try:
-                result = process_inbound_email(db, email_in)
+                # Legacy deployment-global IMAP poll: trusted internal input, single-tenant by
+                # design -> explicitly unscoped (organization_id=None). Never a fallback for the
+                # per-mailbox path (poll_mailbox_inboxes_job).
+                result = process_inbound_email(db, email_in, organization_id=None)
                 action = result.get("action", "unknown")
                 logger.info(f"Processed inbound from {email_in.from_email}: {action}")
             except Exception as e:
