@@ -120,6 +120,10 @@ Interactive docs (`/docs`, `/redoc`, `/openapi.json`) are **off by default** (al
 
 Every route above except `GET /health` requires an `X-API-Key` header. Authentication fails closed: with no key configured (`API_KEY`, `ORG_KEY_MAP` or `ORG_KEYS_*`) the API refuses to start, and a malformed `ORG_KEY_MAP` is rejected rather than ignored. Local development without a key requires the explicit `ALLOW_INSECURE_NO_AUTH=true` opt-in (see `.env.example`).
 
+### System endpoints: tenant metrics vs operator diagnostics
+
+`GET /system/health`, `/system/metrics/classification` and `/system/metrics/states` are scoped to the calling key's organisation (`X-API-Key`). `GET /system/config`, `/system/metrics/llm` and `/system/integration/validate` return **process-wide** information, so a tenant key does **not** open them: they require the separate `X-System-Operator-Key` header (`SYSTEM_OPERATOR_API_KEY`, API service only) and answer 503 while it is unset. See `docs/C13_DEPLOYMENT_RUNBOOK.md` section 6 and `.env.example`.
+
 ### Example: creating and starting a campaign
 
 ```bash

@@ -44,6 +44,20 @@ ORG_KEYS_* entry also maps an organization named "default", the legacy key acts 
 tenant. Remove it from the environment once no operator tooling depends on it; whether
 that is safe on a given deployment is a deployment fact this repository cannot see.
 
+OPERATOR BOUNDARY (PR3)
+-----------------------
+Process-wide diagnostics (/system/config, /system/metrics/llm, /system/integration/validate) are not
+tenant data, so a tenant key must not open them. They use a separate credential,
+SYSTEM_OPERATOR_API_KEY, sent as `X-System-Operator-Key` (require_system_operator below):
+
+* Never derived from, and never accepted from, API_KEY / ORG_KEY_MAP / ORG_KEYS_*. The API refuses to
+  start if the operator key equals any tenant key, and the dependency re-checks per request.
+* Fail closed: unset/blank key, an invalid tenant auth configuration, or a key colliding with a tenant
+  key -> 503. A missing or wrong presented key -> 401 (one message for both). ALLOW_INSECURE_NO_AUTH is
+  never honoured here.
+* The dependency is independent of X-API-Key: operator routes need no tenant key, and tenant routes
+  never accept the operator key.
+
 Usage in endpoints:
     @router.get("/campaigns")
     def list_campaigns(
@@ -163,6 +177,11 @@ def validate_auth_configuration() -> None:
     if _AUTH_CONFIG_ERROR:
         raise AuthConfigurationError(
             f"Invalid authentication configuration: {_AUTH_CONFIG_ERROR}. Refusing to start."
+        )
+    if _operator_key() and _matches_tenant_key(_operator_key()):
+        raise AuthConfigurationError(
+            "SYSTEM_OPERATOR_API_KEY must be different from every tenant API key "
+            "(API_KEY, ORG_KEY_MAP, ORG_KEYS_*). Refusing to start."
         )
     if _KEY_MAP:
         if settings.allow_insecure_no_auth:
@@ -304,3 +323,55 @@ def get_authenticated_org_id(x_api_key: str | None = Header(default=None)) -> st
         logger.error("Request refused: no usable API keys are configured; credential routes fail closed.")
         raise _not_configured()
     return get_current_org_id(x_api_key)
+
+
+# ---------------------------------------------------------------------------
+# Operator (process-wide diagnostics) boundary -- PR3
+# ---------------------------------------------------------------------------
+
+def _ct_equal(a: str, b: str) -> bool:
+    """Constant-time string comparison that cannot raise on non-ASCII input (secrets.compare_digest
+    raises TypeError for non-ASCII ``str``; compare the UTF-8 bytes instead)."""
+    return secrets.compare_digest(a.encode("utf-8", "surrogatepass"), b.encode("utf-8", "surrogatepass"))
+
+
+def _operator_key() -> str:
+    """The configured operator key ('' = not configured). Surrounding whitespace is not part of it."""
+    return settings.system_operator_api_key.get_secret_value().strip()
+
+
+def _matches_tenant_key(candidate: str) -> bool:
+    """True if ``candidate`` equals any effective tenant key (including the legacy API_KEY).
+    Visits every key so the loop time does not depend on which one matches."""
+    matched = False
+    for known_key in _KEY_MAP:
+        if _ct_equal(candidate, known_key):
+            matched = True
+    return matched
+
+
+def require_system_operator(x_system_operator_key: str | None = Header(default=None)) -> None:
+    """
+    Authorize a PROCESS-WIDE operator route (X-System-Operator-Key). Independent of X-API-Key.
+
+    503 (fail closed) when no usable operator key exists: it is unset/blank, the tenant
+    authentication configuration was rejected as invalid, or the operator key equals a tenant key
+    (then it would not be a distinct credential). 401 -- the same body -- when the presented key is
+    missing or wrong. A tenant key alone never passes. Never honours ALLOW_INSECURE_NO_AUTH, and
+    never logs or returns any key value.
+    """
+    configured = _operator_key()
+    if _AUTH_CONFIG_ERROR or not configured or _matches_tenant_key(configured):
+        logger.warning(
+            "Operator request refused: no usable, distinct SYSTEM_OPERATOR_API_KEY is configured; "
+            "process-wide /system routes fail closed."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Operator authentication is not configured on this deployment",
+        )
+    if not x_system_operator_key or not _ct_equal(x_system_operator_key, configured):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing operator key",
+        )

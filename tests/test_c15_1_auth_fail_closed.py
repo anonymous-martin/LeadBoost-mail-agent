@@ -40,6 +40,9 @@ AUTH_DEPS = {
 }
 # The ONLY routes allowed to be reachable without a key. Anything new must be added here on purpose.
 PUBLIC_PATHS = {"/health", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+# PR3: process-wide routes that are deliberately NOT tenant-key routes (a tenant key must not open them).
+# They use require_system_operator instead; tests/test_pr3_system_operator_boundary.py covers their access.
+OPERATOR_PATHS = {"/system/config", "/system/metrics/llm", "/system/integration/validate"}
 
 KEY_A, KEY_B, LEGACY = "key-a-" + "a" * 20, "key-b-" + "b" * 20, "legacy-" + "l" * 20
 ORG_A, ORG_B = "org-a", "org-b"
@@ -108,7 +111,7 @@ def _all_calls(dependant):
         yield from _all_calls(d)
 
 
-PROTECTED = [(m, r) for m, r in _routes() if r.path not in PUBLIC_PATHS]
+PROTECTED = [(m, r) for m, r in _routes() if r.path not in PUBLIC_PATHS and r.path not in OPERATOR_PATHS]
 IDS = [f"{m} {r.path}" for m, r in PROTECTED]
 
 
@@ -118,9 +121,15 @@ def test_every_route_carries_a_real_auth_dependency_unless_explicitly_public():
     missing = [
         f"{m} {r.path}"
         for m, r in _routes()
-        if r.path not in PUBLIC_PATHS and not (set(_all_calls(r.dependant)) & AUTH_DEPS)
+        if r.path not in PUBLIC_PATHS and r.path not in OPERATOR_PATHS and not (set(_all_calls(r.dependant)) & AUTH_DEPS)
     ]
     assert not missing, f"routes without an authentication dependency: {missing}"
+    # PR3: the operator routes must carry the operator dependency and NO tenant dependency.
+    operator = [(m, r) for m, r in _routes() if r.path in OPERATOR_PATHS]
+    assert {r.path for _, r in operator} == OPERATOR_PATHS
+    for m, r in operator:
+        calls = set(_all_calls(r.dependant))
+        assert deps.require_system_operator in calls and not (calls & AUTH_DEPS), (m, r.path)
     assert {r.path for _, r in _routes()} & PUBLIC_PATHS == {"/health"}  # only /health is an APIRoute
 
 

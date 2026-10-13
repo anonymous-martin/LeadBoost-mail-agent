@@ -112,6 +112,8 @@ def check_api(settings) -> None:
     if "default" in orgs and not settings.api_key:
         _r("WARN", "org 'default'", "an ORG_KEYS_*/ORG_KEY_MAP entry maps to org 'default'")
 
+    check_operator_key(settings)
+
     sender = (settings.leadboost_integration_sender_email or "").strip()
     if "@" in sender:
         _r("PASS", "LEADBOOST_INTEGRATION_SENDER_EMAIL", "set (deployment-wide sender persona; known C15 multi-tenant limitation)")
@@ -119,10 +121,28 @@ def check_api(settings) -> None:
         _r("WARN", "LEADBOOST_INTEGRATION_SENDER_EMAIL", "empty/invalid: generated-outreach requests return 503")
 
 
+def check_operator_key(settings) -> None:
+    """SYSTEM_OPERATOR_API_KEY (PR3): presence and distinctness only; the value is never printed."""
+    from mailer_agent.api import deps
+
+    key = settings.system_operator_api_key.get_secret_value().strip()
+    if not key:
+        _r("INFO", "SYSTEM_OPERATOR_API_KEY", "not set: /system/config, /system/metrics/llm and /system/integration/validate answer 503 (fail closed). Set it only if an operator needs those process-wide routes")
+        return
+    if deps._matches_tenant_key(key):
+        _r("FAIL", "SYSTEM_OPERATOR_API_KEY", "equals a tenant API key (API_KEY / ORG_KEY_MAP / ORG_KEYS_*): the API REFUSES TO START. Use a distinct value")
+        return
+    _r("PASS", "SYSTEM_OPERATOR_API_KEY", "set and distinct from every tenant key (value not shown); presented as the X-System-Operator-Key header")
+    if len(key) < MIN_KEY_LEN:
+        _r("WARN", "SYSTEM_OPERATOR_API_KEY", f"shorter than {MIN_KEY_LEN} characters")
+
+
 def check_worker() -> None:
     _r("INFO", "scheduler", "worker.py always starts the scheduler: run exactly ONE worker instance")
     if os.environ.get("ORG_KEY_MAP") or os.environ.get("API_KEY"):
         _r("INFO", "ORG_KEY_MAP/API_KEY", "set on the worker but unused there (consumed by the API only)")
+    if os.environ.get("SYSTEM_OPERATOR_API_KEY"):
+        _r("WARN", "SYSTEM_OPERATOR_API_KEY", "set on the worker but unused there (API only): remove it from the worker's environment")
 
 
 def main(argv: list[str] | None = None) -> int:
