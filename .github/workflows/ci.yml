@@ -22,10 +22,13 @@ env:
   LIVE_SENDING_ENABLED: "false"
   AUTO_REPLY_ENABLED: "false"
 
+# Runner image is deliberately pinned (every job below uses ubuntu-24.04, never ubuntu-latest) so the
+# PostgreSQL / SMTP / Dovecot-IMAP integration jobs run on a known OS image. Moving to a newer image
+# should be an intentional, tested change to these labels, not an automatic `ubuntu-latest` migration.
 jobs:
   quality-and-tests:
     name: Quality & deterministic tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -92,7 +95,7 @@ jobs:
 
   postgres-integration:
     name: PostgreSQL integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -156,7 +159,7 @@ jobs:
 
   local-smtp:
     name: Local SMTP protocol integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -181,7 +184,7 @@ jobs:
 
   m3-imap-e2e:
     name: M3 real IMAP end-to-end + C12 full chain (disposable Dovecot / SMTP, PostgreSQL)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       # Both Dovecot suites pick PostgreSQL up via POSTGRES_TEST_URL; the C12
       # full-chain test requires it whenever it is set (no silent SQLite fallback).
