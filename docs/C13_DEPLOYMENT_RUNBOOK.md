@@ -31,7 +31,13 @@ expired `SENDING` becomes `UNKNOWN`, never `QUEUED`; ambiguous outcomes stay
 ## 2. Environment contract
 
 Run `python scripts/check_config.py --role api|worker` in each service's shell.
-It prints presence/shape only, never values.
+It reports presence, validity and shape without printing secrets. It also emits
+non-secret diagnostic details, including a redacted database target, organization
+IDs and scheduler status, and reports `LIVE_SENDING_ENABLED` /
+`AUTO_REPLY_ENABLED` as seen by the **environment of the shell it runs in**.
+It does not read the provider dashboard or another service's environment, does
+not report `API_DOCS_ENABLED`, and cannot tell you what an already-running
+process started with (section 6).
 
 | Variable | API | Worker | Secret | Notes |
 |---|---|---|---|---|
@@ -42,8 +48,9 @@ It prints presence/shape only, never values.
 | `ORG_KEYS_<org>` | optional | no | yes | Third key source, merged below `ORG_KEY_MAP` |
 | `LEADBOOST_INTEGRATION_SENDER_EMAIL` | yes | no | no | Deployment-wide sender persona (C15 limitation). Empty -> first generated-outreach dispatch per org returns 503 |
 | `GROQ_API_KEY` | yes | yes | yes | Generation |
-| `LIVE_SENDING_ENABLED` | read (`/health`) | **decides dispatch** | no | Separate copy per service -- see section 7 |
+| `LIVE_SENDING_ENABLED` | own copy, **not** what decides LeadBoost dispatch (used by the legacy `POST /messages/{id}/approve` route and the insecure-auth start-up guard; also logged at API startup) | **decides dispatch** | no | Separate copy per service -- see sections 6 and 7 |
 | `AUTO_REPLY_ENABLED` | yes | yes | no | Separate copy per service. Keep `false` unless authorised |
+| `API_DOCS_ENABLED` | yes | ignored | no | Default **`false`**: `/docs`, `/redoc` and `/openapi.json` return 404. Enabling is a deliberate operator choice -- see section 6 |
 | `RUN_SCHEDULER_IN_PROCESS` | **must be `false`** | n/a | no | See section 1 |
 | `EXTERNAL_DISPATCH_SHUTDOWN_DRAIN_SECONDS` | no | yes | no | Default 25 |
 | `EXTERNAL_DISPATCH_POLL_SECONDS`, `_RECOVERY_POLL_SECONDS`, `_MAX_PER_CYCLE`, `_LEASE_SECONDS`, `_GENERATION_LEASE_SECONDS` | no | yes | no | Tunables; defaults 15 / 60 / 5 / 900 / 300. Do not change as part of a deploy |
@@ -88,8 +95,9 @@ org `default`.
 
 Safe verification after a key change (read-only, no send): from a trusted shell,
 `GET https://<mailer-host>/mailboxes` with `X-API-Key: <key>` should return 200
-for a valid key and 401/403 for a wrong key, and `GET /system/health` (authenticated,
-organisation-scoped, queries the database) should return 200. Both prove TLS +
+for a valid key and 401/403 for a wrong key, and `GET /system/health` (authenticated; per-organisation
+counts plus process-wide LLM counters and the API process's flags; queries the
+database) should return 200. Both prove TLS +
 key mapping + database reachability **for the API only**; they say nothing about
 the worker. Rotation/revocation procedure is C15/C16.
 
@@ -153,13 +161,40 @@ Migration 007: drain non-terminal dispatches first (the tool blocks otherwise).
 
 | Endpoint | Auth | What it proves | What it does **not** prove |
 |---|---|---|---|
-| Mailer `GET /health` | none | The API process is up and serving. Static `ok`; also echoes the two sending flags | Database, worker, SMTP, IMAP, readiness |
-| Mailer `GET /system/health` | key | Auth + key mapping + database queries work, for that org | Worker liveness, SMTP/IMAP |
+| Mailer `GET /health` | none | The API process is up and serving. Returns exactly `{"status":"ok"}` | Database, worker, SMTP, IMAP, readiness -- and **no configuration**: it does not report `LIVE_SENDING_ENABLED` or `AUTO_REPLY_ENABLED` (earlier revisions did) |
+| Mailer `GET /system/health` | any valid API key | Auth + key mapping + database queries work, for that org | Worker liveness, SMTP/IMAP. It also returns **process-wide** data (LLM counters and the **API process's** two flags), not only that organisation's, and there is no operator role: any valid tenant key can read it. Its flags describe the API, **not the worker** |
 | Worker | -- | **No liveness signal exists.** Detect failure from service status/restarts and logs | -- |
 
 Render's health check on `/health` therefore only gates routing to a live
-process. `/health` unauthenticated exposure and a real worker liveness signal
-are C15. **Do not claim the worker is monitored** until one exists.
+process. `/health` is unauthenticated by design and now minimal; a real worker
+liveness signal is C15. **Do not claim the worker is monitored** until one exists.
+
+### Where to look for each fact
+
+The API and the worker are separate processes with separate environments. A
+setting on one says nothing about the other.
+
+| Question | Look at | Not a valid source |
+|---|---|---|
+| Will the **worker** send mail? (its `LIVE_SENDING_ENABLED`) | The worker service's environment in the provider dashboard; `python scripts/check_config.py --role worker` in the worker's shell (prints the flag as seen by that shell) | `/health`, `/system/health`, `/system/config`, the API service's settings |
+| What is the **API** configured with? (key sources, `RUN_SCHEDULER_IN_PROCESS`, `API_DOCS_ENABLED`, its own copy of the flags) | The API service's environment in the dashboard; `check_config.py --role api` in the API's shell | The worker's settings |
+| Is the worker alive and making progress? | Provider service status, restarts and logs; a known test dispatch advancing `queued -> sending -> sent` | `/health` (it only speaks for the API) |
+| Is a running process using the value that is set now? | The provider's deploy/restart history for that service. Settings are read when the process starts | The dashboard value alone |
+
+None of this proves the live provider configuration is correct; that is verified
+in C14 against the deployed services.
+
+### API documentation endpoints (`API_DOCS_ENABLED`)
+
+`/docs`, `/redoc` and `/openapi.json` return 404 unless `API_DOCS_ENABLED=true` is
+set on the **API** service (default `false`; read at API start-up, so a
+restart/redeploy applies a change; the worker ignores it). When enabled, all
+three are served **without an API key**, they reveal the complete route and
+schema inventory to anyone who can reach the service, and FastAPI's default
+pages load their assets from a public CDN. Enable it only deliberately (for
+example local development or a private network) and record the decision. Leave it
+unset on a deployed service, and do not use the docs page to check that the API is
+up -- use `/health`.
 
 ## 7. Pause / resume sending
 
@@ -230,6 +265,7 @@ resuming a worker after a failed migration.
 | Bare `postgresql://` resolves to `psycopg` (not installed) on SQLAlchemy 2.1.4, `psycopg2` on 2.0.54 | Locally runtime-verified; fixed + unit-tested |
 | `check_config.py` shape/presence checks and no-secret output | Unit-tested (`tests/test_check_config.py`) |
 | Worker SIGTERM ordered drain, `SENDING -> UNKNOWN` | Implemented; covered by existing `tests/test_external_dispatch_scheduler_shutdown.py`; **not** observed on a deployed service |
+| `/docs`, `/redoc`, `/openapi.json` return 404 by default and 200 only with `API_DOCS_ENABLED=true`; `/health` returns exactly `{"status":"ok"}` with 200 | CI-tested by `tests/test_pr2_api_surface.py` (the real app built in a fresh process). **Not** observed on a deployed service |
 | `render.yaml` correctness, live service settings, deployed HTTPS, worker liveness, live key agreement | **Not verified** (dashboard-only / C14) |
 
 Deferred: C14 -- deployed HTTPS/worker E2E with disposable SMTP/IMAP. C15 -- deployed

@@ -54,7 +54,7 @@ Two design principles run through every file, both learned from auditing weaker 
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in GROQ_API_KEY, SMTP_*, IMAP_* — see below
-python run.py           # serves on http://localhost:8000, docs at /docs
+python run.py           # serves on http://localhost:8000 (interactive docs at /docs only if API_DOCS_ENABLED=true)
 ```
 
 Run the test suite any time: `pytest -q`.
@@ -97,7 +97,7 @@ Leave `LIVE_SENDING_ENABLED=false` and `AUTO_REPLY_ENABLED=false` for your first
 
 ## API reference
 
-Full interactive docs are auto-served at `/docs` (Swagger) once running. Summary:
+Interactive docs (`/docs`, `/redoc`, `/openapi.json`) are **off by default** (all three return 404). Set `API_DOCS_ENABLED=true` to serve them (see `.env.example`); when enabled they are reachable without an API key, so leave them off on a deployed service unless that is intended. Summary:
 
 | Method & path | Purpose |
 |---|---|
@@ -116,7 +116,7 @@ Full interactive docs are auto-served at `/docs` (Swagger) once running. Summary
 | `POST /suppress` | Manually add an address to the suppression list |
 | `GET /suppress/{email}` | Check suppression status |
 | `POST /webhooks/inbound-email` | Production-recommended reply intake — see "Reply monitoring" below |
-| `GET /health` | Liveness + current safety-toggle state |
+| `GET /health` | Liveness only: returns `{"status":"ok"}`. Not a readiness check and not a configuration check (it does not report `LIVE_SENDING_ENABLED` / `AUTO_REPLY_ENABLED`) |
 
 Every route above except `GET /health` requires an `X-API-Key` header. Authentication fails closed: with no key configured (`API_KEY`, `ORG_KEY_MAP` or `ORG_KEYS_*`) the API refuses to start, and a malformed `ORG_KEY_MAP` is rejected rather than ignored. Local development without a key requires the explicit `ALLOW_INSECURE_NO_AUTH=true` opt-in (see `.env.example`).
 
