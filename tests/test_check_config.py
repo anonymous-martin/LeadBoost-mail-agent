@@ -103,3 +103,35 @@ def test_short_key_and_missing_sender_warn_only(tmp_path):
     rc, out = run(tmp=tmp_path, ORG_KEY_MAP='{"short": "org1"}', LEADBOOST_INTEGRATION_SENDER_EMAIL="")
     assert rc == 0, out
     assert out.count("WARN") >= 2
+
+
+# --------------------------------------------------------------------------- PR3: SYSTEM_OPERATOR_API_KEY
+OPKEY = "Q" * 40  # a stand-in operator key; must never be echoed
+
+
+def test_operator_key_unset_is_informational_and_fails_closed_by_description(tmp_path):
+    rc, out = run(tmp=tmp_path)
+    assert rc == 0, out
+    assert "SYSTEM_OPERATOR_API_KEY" in out and "503" in out
+
+
+def test_distinct_operator_key_passes_and_is_never_echoed(tmp_path):
+    rc, out = run(tmp=tmp_path, SYSTEM_OPERATOR_API_KEY=OPKEY)
+    assert rc == 0, out
+    assert "[PASS]" in out and "X-System-Operator-Key" in out and OPKEY not in out
+
+
+def test_operator_key_equal_to_a_tenant_key_fails_the_preflight(tmp_path):
+    rc, out = run(tmp=tmp_path, SYSTEM_OPERATOR_API_KEY=KEY)  # KEY is the tenant key in _BASE
+    assert rc == 1 and "REFUSES TO START" in out and "SYSTEM_OPERATOR_API_KEY" in out
+
+
+def test_short_operator_key_warns_only(tmp_path):
+    rc, out = run(tmp=tmp_path, SYSTEM_OPERATOR_API_KEY="short-op-key")
+    assert rc == 0 and "shorter than" in out and "short-op-key" not in out
+
+
+def test_operator_key_on_the_worker_warns_and_is_never_echoed(tmp_path):
+    rc, out = run("worker", tmp=tmp_path, drop=("ORG_KEY_MAP",), SYSTEM_OPERATOR_API_KEY=OPKEY)
+    assert rc == 0, out
+    assert "SYSTEM_OPERATOR_API_KEY" in out and "WARN" in out and OPKEY not in out

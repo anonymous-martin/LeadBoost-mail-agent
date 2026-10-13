@@ -125,6 +125,12 @@ class Settings(BaseSettings):
     # deliberate operator choice: when enabled, those three routes are served WITHOUT an API key
     # (they sit outside the authenticated routers). Read once at API start-up; the worker ignores it.
     api_docs_enabled: bool = False
+    # PR3: credential for the PROCESS-WIDE operator routes (/system/config, /system/metrics/llm,
+    # /system/integration/validate), presented as the `X-System-Operator-Key` header. It is NOT a
+    # tenant key: no value of API_KEY / ORG_KEY_MAP / ORG_KEYS_* grants operator access, and the API
+    # refuses to start if this value equals one of them. Empty (the default) means the operator routes
+    # answer 503 for everyone (fail closed). API service only -- the worker never reads it. Never log it.
+    system_operator_api_key: SecretStr = SecretStr("")
 
     # --- Mailbox credential encryption (M1) --------------------------------
     # Fernet key (urlsafe-base64, 32 bytes) used to encrypt mailbox SMTP/IMAP

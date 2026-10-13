@@ -9,10 +9,21 @@ GROUP BY / COUNT so they scale with an index scan instead of loading every
 row into Python -- and, critically, so one organization's dashboard can
 never reveal another organization's volume.
 
-/system/integration/validate, /system/metrics/llm, and /system/config are
-the exceptions: they report process-wide booleans/counters (is this
-deployment healthy, provider retry stats, safety-toggle configuration),
-not any tenant's data, so they are intentionally left unscoped.
+Access model (PR3). Two routers, each route explicitly in exactly one:
+
+* TENANT routes (``tenant_router``): /system/health, /system/metrics/classification,
+  /system/metrics/states. Authenticated with a tenant key (X-API-Key) and scoped to that
+  key's organization. They return no process-wide data.
+* OPERATOR routes (``operator_router``): /system/integration/validate, /system/metrics/llm,
+  /system/config. They report process-wide booleans/counters/configuration (is this
+  deployment wired up, provider retry stats, API-process settings) -- not any tenant's data --
+  so they are intentionally unscoped, and therefore are NOT reachable with a tenant key. They
+  require the separate operator credential (X-System-Operator-Key, SYSTEM_OPERATOR_API_KEY; see
+  deps.require_system_operator) and no tenant key at all. The tenant router's tenant-key dependency
+  is router-level, which is why the operator routes live on their own router instead of sharing it.
+
+``router`` (what main.py includes) is the two combined; a new /system route must be added to one of
+the two on purpose (tests/test_pr3_system_operator_boundary.py pins the inventory).
 """
 
 from __future__ import annotations
@@ -21,27 +32,31 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from mailer_agent.api.deps import get_current_org_id, require_api_key
+from mailer_agent.api.deps import get_current_org_id, require_api_key, require_system_operator
 from mailer_agent.config import get_settings
 from mailer_agent.db import get_db
 from mailer_agent.integration import mailer_agent
 from mailer_agent.models import Campaign, Contact, ContactStatus, Message, MessageDirection, MessageStatus
 
-router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(require_api_key)])
+tenant_router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(require_api_key)])
+operator_router = APIRouter(
+    prefix="/system", tags=["system-operator"], dependencies=[Depends(require_system_operator)]
+)
 
 
-@router.get("/health")
+@tenant_router.get("/health")
 def get_system_health(
     org_id: str = Depends(get_current_org_id),
     db: Session = Depends(get_db),
 ):
     """
-    Comprehensive health metrics for the CALLING ORGANIZATION ONLY.
+    Health metrics for the CALLING ORGANIZATION ONLY.
 
-    Returns contact-state distribution, message send stats, classification
-    success rate, LLM provider metrics (process-wide -- see note below),
-    and the safety-toggle configuration. All per-tenant counts are
-    computed with a single grouped SQL query each, scoped to org_id.
+    Returns contact-state distribution, message send stats and classification
+    success rate. All counts are computed with a single grouped SQL query each,
+    scoped to org_id. Process-wide data (LLM provider metrics, API-process
+    settings) is deliberately NOT part of this response: it is available to the
+    operator only, via /system/metrics/llm and /system/config.
     """
     # --- Contact state distribution: one GROUP BY, not one query per enum ---
     state_rows = (
@@ -88,8 +103,6 @@ def get_system_health(
     )
     classification_total, classification_success = ((v or 0) for v in class_row)
 
-    settings = get_settings()
-
     return {
         "organization_id": org_id,
         "contact_states": contact_states,
@@ -107,33 +120,26 @@ def get_system_health(
                 classification_success / classification_total if classification_total else 0
             ),
         },
-        # LLM metrics are process-wide (the provider client has no concept
-        # of organization), not per-tenant -- labeled explicitly so this
-        # isn't mistaken for org-scoped data.
-        "llm_metrics_process_wide": mailer_agent.get_llm_metrics(),
-        "settings": {
-            "live_sending_enabled": settings.live_sending_enabled,
-            "auto_reply_enabled": settings.auto_reply_enabled,
-        },
     }
 
 
-@router.get("/integration/validate")
+@operator_router.get("/integration/validate")
 def validate_integration():
     """
-    Validate that all components are properly integrated.
+    OPERATOR ONLY. Validate that all components are properly integrated.
 
     Checks: LLM availability, configuration, module imports, database
-    connectivity. Deployment-wide booleans only -- no tenant data -- so
-    this intentionally is not org-scoped.
+    connectivity. Deployment-wide booleans (and, on failure, the raw error
+    text for the operator) -- no tenant data -- so this intentionally is not
+    org-scoped, and is not reachable with a tenant key.
     """
     return mailer_agent.validate_integration()
 
 
-@router.get("/metrics/llm")
+@operator_router.get("/metrics/llm")
 def get_llm_metrics():
     """
-    Process-wide LLM provider metrics (total calls, success rate, rate
+    OPERATOR ONLY. Process-wide LLM provider metrics (total calls, success rate, rate
     limits, timeouts, malformed outputs). Not org-scoped: the underlying
     provider client and its retry/metrics counters are shared by the
     whole process, not partitioned per tenant.
@@ -141,7 +147,7 @@ def get_llm_metrics():
     return mailer_agent.get_llm_metrics()
 
 
-@router.get("/metrics/classification")
+@tenant_router.get("/metrics/classification")
 def get_classification_metrics(
     org_id: str = Depends(get_current_org_id),
     db: Session = Depends(get_db),
@@ -189,7 +195,7 @@ def get_classification_metrics(
     }
 
 
-@router.get("/metrics/states")
+@tenant_router.get("/metrics/states")
 def get_state_distribution(
     org_id: str = Depends(get_current_org_id),
     db: Session = Depends(get_db),
@@ -218,11 +224,12 @@ def get_state_distribution(
     }
 
 
-@router.get("/config")
+@operator_router.get("/config")
 def get_system_config():
     """
-    Safe (non-secret) subset of process configuration. Not org-scoped --
-    these are deployment-wide settings, not per-tenant data.
+    OPERATOR ONLY. Safe (non-secret) subset of the API process's configuration.
+    Not org-scoped -- these are deployment-wide settings, not per-tenant data --
+    and they describe THIS (API) process, not the separate worker.
     """
     settings = get_settings()
 
@@ -239,3 +246,10 @@ def get_system_config():
         "run_scheduler_in_process": settings.run_scheduler_in_process,
         "database_type": "postgresql" if "postgresql" in settings.database_url else "sqlite",
     }
+
+
+# What main.py includes. Built LAST on purpose: include_router copies the routes registered on a router
+# at the moment it is called, so this must come after every route above is defined.
+router = APIRouter()
+router.include_router(tenant_router)
+router.include_router(operator_router)

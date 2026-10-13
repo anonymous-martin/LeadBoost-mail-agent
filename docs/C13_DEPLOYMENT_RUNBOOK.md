@@ -50,6 +50,7 @@ process started with (section 6).
 | `GROQ_API_KEY` | yes | yes | yes | Generation |
 | `LIVE_SENDING_ENABLED` | own copy, **not** what decides LeadBoost dispatch (used by the legacy `POST /messages/{id}/approve` route and the insecure-auth start-up guard; also logged at API startup) | **decides dispatch** | no | Separate copy per service -- see sections 6 and 7 |
 | `AUTO_REPLY_ENABLED` | yes | yes | no | Separate copy per service. Keep `false` unless authorised |
+| `SYSTEM_OPERATOR_API_KEY` | optional | **do not set** (ignored) | yes | Operator-only credential for the process-wide `/system/*` routes, sent as `X-System-Operator-Key`. **Not a tenant key**; must differ from every tenant key or the API refuses to start. Unset = those routes answer 503. See section 6 |
 | `API_DOCS_ENABLED` | yes | ignored | no | Default **`false`**: `/docs`, `/redoc` and `/openapi.json` return 404. Enabling is a deliberate operator choice -- see section 6 |
 | `RUN_SCHEDULER_IN_PROCESS` | **must be `false`** | n/a | no | See section 1 |
 | `EXTERNAL_DISPATCH_SHUTDOWN_DRAIN_SECONDS` | no | yes | no | Default 25 |
@@ -95,9 +96,8 @@ org `default`.
 
 Safe verification after a key change (read-only, no send): from a trusted shell,
 `GET https://<mailer-host>/mailboxes` with `X-API-Key: <key>` should return 200
-for a valid key and 401/403 for a wrong key, and `GET /system/health` (authenticated; per-organisation
-counts plus process-wide LLM counters and the API process's flags; queries the
-database) should return 200. Both prove TLS +
+for a valid key and 401/403 for a wrong key, and `GET /system/health` (authenticated; that organisation's
+counts only; queries the database) should return 200. Both prove TLS +
 key mapping + database reachability **for the API only**; they say nothing about
 the worker. Rotation/revocation procedure is C15/C16.
 
@@ -162,7 +162,7 @@ Migration 007: drain non-terminal dispatches first (the tool blocks otherwise).
 | Endpoint | Auth | What it proves | What it does **not** prove |
 |---|---|---|---|
 | Mailer `GET /health` | none | The API process is up and serving. Returns exactly `{"status":"ok"}` | Database, worker, SMTP, IMAP, readiness -- and **no configuration**: it does not report `LIVE_SENDING_ENABLED` or `AUTO_REPLY_ENABLED` (earlier revisions did) |
-| Mailer `GET /system/health` | any valid API key | Auth + key mapping + database queries work, for that org | Worker liveness, SMTP/IMAP. It also returns **process-wide** data (LLM counters and the **API process's** two flags), not only that organisation's, and there is no operator role: any valid tenant key can read it. Its flags describe the API, **not the worker** |
+| Mailer `GET /system/health` | a tenant API key | Auth + key mapping + database queries work, for that org. Returns **only that organisation's** counts (earlier revisions also returned process-wide LLM counters and the API's flags; they were removed) | Worker liveness, SMTP/IMAP, any process-wide state |
 | Worker | -- | **No liveness signal exists.** Detect failure from service status/restarts and logs | -- |
 
 Render's health check on `/health` therefore only gates routing to a live
@@ -177,12 +177,40 @@ setting on one says nothing about the other.
 | Question | Look at | Not a valid source |
 |---|---|---|
 | Will the **worker** send mail? (its `LIVE_SENDING_ENABLED`) | The worker service's environment in the provider dashboard; `python scripts/check_config.py --role worker` in the worker's shell (prints the flag as seen by that shell) | `/health`, `/system/health`, `/system/config`, the API service's settings |
-| What is the **API** configured with? (key sources, `RUN_SCHEDULER_IN_PROCESS`, `API_DOCS_ENABLED`, its own copy of the flags) | The API service's environment in the dashboard; `check_config.py --role api` in the API's shell | The worker's settings |
+| What is the **API** configured with? (key sources, `RUN_SCHEDULER_IN_PROCESS`, `API_DOCS_ENABLED`, its own copy of the flags) | The API service's environment in the dashboard; `check_config.py --role api` in the API's shell; or `GET /system/config` with the operator key (describes the API process only) | The worker's settings |
 | Is the worker alive and making progress? | Provider service status, restarts and logs; a known test dispatch advancing `queued -> sending -> sent` | `/health` (it only speaks for the API) |
 | Is a running process using the value that is set now? | The provider's deploy/restart history for that service. Settings are read when the process starts | The dashboard value alone |
 
 None of this proves the live provider configuration is correct; that is verified
 in C14 against the deployed services.
+
+### `/system/*`: tenant metrics vs operator diagnostics (`SYSTEM_OPERATOR_API_KEY`)
+
+Some `/system/*` data belongs to one organisation; some describes the whole
+process and is not tenant data. They are separated:
+
+| Route | Data | Credential |
+|---|---|---|
+| `GET /system/health`, `/system/metrics/classification`, `/system/metrics/states` | **Organisation-scoped** (the calling key's organisation only) | Tenant key: `X-API-Key` |
+| `GET /system/config` | **Process-wide**: the API process's non-secret settings (including its `LIVE_SENDING_ENABLED` / `AUTO_REPLY_ENABLED`, which are **not** the worker's) | Operator key: `X-System-Operator-Key` |
+| `GET /system/metrics/llm` | **Process-wide**: LLM provider call counters | Operator key |
+| `GET /system/integration/validate` | **Process-wide**: wiring/database checks; on failure it returns the raw error text, for the operator | Operator key |
+
+Access rules (the operator routes are independent of tenant keys):
+
+- **A tenant key never grants operator access.** Neither does the legacy `API_KEY`, nor any `ORG_KEY_MAP` / `ORG_KEYS_*` value. The operator routes also need no tenant key.
+- Unset or blank `SYSTEM_OPERATOR_API_KEY` -> the three operator routes answer **503** to everyone (fail closed; `ALLOW_INSECURE_NO_AUTH` does not open them). A missing, empty or wrong presented key -> **401** (same message for both). A correct key -> 200.
+- The operator key must be a **distinct** secret. If it equals any tenant key the API **refuses to start** (and the routes answer 503 until fixed); `python scripts/check_config.py --role api` reports this before a deploy.
+- API service only. The worker never reads it; `check_config.py --role worker` warns if it is set there.
+- The tenant `/system/health` response no longer contains `llm_metrics_process_wide` or `settings`. Any caller that read those fields must switch to the operator routes. No caller in this repository or on LeadBoost `main` does; external monitoring tooling is not visible from the repositories.
+
+Configuring it (no value is ever shown in this repository or by these tools):
+
+1. Generate a random value locally (as for any key: `python -c "import secrets; print(secrets.token_urlsafe(32))"`) and do not paste it into tickets, chat or commits.
+2. Set it as a secret environment variable on the **API** service in the provider's dashboard only, then restart/redeploy the API (settings are read at start-up). `render.yaml` does not declare it, and this change does not provision it anywhere.
+3. Verify without sharing output: with the key, `GET /system/config` -> 200; with a tenant key only -> 401.
+
+Rotation: there is a single operator key and no overlap window. Generate a new value, set it on the API service, restart the API, then update whatever operator tooling holds it. The old value is rejected (401) as soon as the API restarts. Never reuse a tenant key, and rotate it like any other secret if exposed.
 
 ### API documentation endpoints (`API_DOCS_ENABLED`)
 
@@ -266,6 +294,7 @@ resuming a worker after a failed migration.
 | `check_config.py` shape/presence checks and no-secret output | Unit-tested (`tests/test_check_config.py`) |
 | Worker SIGTERM ordered drain, `SENDING -> UNKNOWN` | Implemented; covered by existing `tests/test_external_dispatch_scheduler_shutdown.py`; **not** observed on a deployed service |
 | `/docs`, `/redoc`, `/openapi.json` return 404 by default and 200 only with `API_DOCS_ENABLED=true`; `/health` returns exactly `{"status":"ok"}` with 200 | CI-tested by `tests/test_pr2_api_surface.py` (the real app built in a fresh process). **Not** observed on a deployed service |
+| Tenant `/system/health` is organisation-scoped and has no process-wide fields; the three operator routes reject a tenant key / legacy key / missing / wrong operator key, fail closed when unset, and need no tenant key; an operator key equal to a tenant key is refused at start-up; no credential reaches responses or logs | CI-tested by `tests/test_pr3_system_operator_boundary.py` and `tests/test_c15_1_auth_fail_closed.py`; `check_config.py` handling by `tests/test_check_config.py`. **Not** observed on a deployed service, and **no operator key has been provisioned** anywhere |
 | `render.yaml` correctness, live service settings, deployed HTTPS, worker liveness, live key agreement | **Not verified** (dashboard-only / C14) |
 
 Deferred: C14 -- deployed HTTPS/worker E2E with disposable SMTP/IMAP. C15 -- deployed
