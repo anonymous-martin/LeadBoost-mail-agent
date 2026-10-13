@@ -216,12 +216,13 @@ def validate_auth_configuration() -> None:
 def _resolve_org(api_key: str) -> str | None:
     """
     Resolve an API key to its org_id.  Returns None if the key is unknown.
-    Uses constant-time comparison for every candidate to prevent timing attacks.
+    Uses constant-time comparison for every candidate to prevent timing attacks. Comparison is on
+    UTF-8 bytes (_ct_equal), so a non-ASCII presented key is simply "unknown" instead of raising.
     """
     matched_org: str | None = None
     for known_key, org_id in _KEY_MAP.items():
-        # compare_digest always compares full strings - safe against timing.
-        if secrets.compare_digest(api_key, known_key):
+        # Visits every key so the loop time does not depend on which one matches.
+        if _ct_equal(api_key, known_key):
             matched_org = org_id
     return matched_org
 
