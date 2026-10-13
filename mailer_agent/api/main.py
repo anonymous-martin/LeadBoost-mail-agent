@@ -64,6 +64,11 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
+    # PR2: documentation is opt-in (API_DOCS_ENABLED). All three URLs must be set together:
+    # leaving /openapi.json up would publish the whole schema even with the Swagger/ReDoc pages off.
+    docs_url="/docs" if settings.api_docs_enabled else None,
+    redoc_url="/redoc" if settings.api_docs_enabled else None,
+    openapi_url="/openapi.json" if settings.api_docs_enabled else None,
 )
 
 app.include_router(campaigns.router)
@@ -79,8 +84,7 @@ app.include_router(mailboxes.router)
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "live_sending_enabled": settings.live_sending_enabled,
-        "auto_reply_enabled": settings.auto_reply_enabled,
-    }
+    # PR2: unauthenticated liveness only (Render's healthCheckPath). Deliberately NOT a source for
+    # configuration: the sending/auto-reply flags are per-process (the worker has its own copy) and
+    # must not be published to anonymous callers. Not a readiness check: no database/worker probing.
+    return {"status": "ok"}

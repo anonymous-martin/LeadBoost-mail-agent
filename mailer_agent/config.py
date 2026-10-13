@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     # together with LIVE_SENDING_ENABLED=true, and never honoured by the integration or mailbox
     # routes. Default off; never set it on a deployed service.
     allow_insecure_no_auth: bool = False
+    # PR2: the interactive API documentation (/docs, /redoc and /openapi.json) is OFF by default so a
+    # deployed API does not publish its full route inventory. Setting API_DOCS_ENABLED=true is a
+    # deliberate operator choice: when enabled, those three routes are served WITHOUT an API key
+    # (they sit outside the authenticated routers). Read once at API start-up; the worker ignores it.
+    api_docs_enabled: bool = False
 
     # --- Mailbox credential encryption (M1) --------------------------------
     # Fernet key (urlsafe-base64, 32 bytes) used to encrypt mailbox SMTP/IMAP
