@@ -181,86 +181,81 @@ Map your provider's native webhook payload to this shape using its own payload-t
 
 ## Deploying to Render
 
-This repo ships a `render.yaml` Blueprint that provisions everything together: a Postgres database, a Web Service (the API), and a Background Worker (the scheduler — reply polling + follow-up dispatch). They're kept as two separate Render services deliberately: the API can run multiple `gunicorn` worker processes for throughput, but the scheduler must run exactly once, so it lives in its own single process instead of inside every API worker (which would otherwise send every follow-up multiple times).
+**Nothing is deployed from this repository by itself.** `render.yaml` is a Render Blueprint for a **first production deployment** with two services and **no database**:
 
-1. Push this repo to GitHub/GitLab.
-2. In the Render dashboard: **New → Blueprint**, point it at the repo. Render reads `render.yaml` and provisions the database, web service, and background worker together, with `DATABASE_URL` already wired from the database to both services.
-3. Both services default to Render's paid **Starter** plan ($7/mo each, ~$13-20/mo total with the database) rather than free tier — the free tier spins down web services after 15 minutes of inactivity (30-60s cold start on the next request) and deletes free Postgres databases after about 30 days, neither of which is workable for something that needs to receive webhooks and run scheduled jobs continuously.
-4. Fill in the secrets Render left blank (`sync: false` in `render.yaml` means "set this in the dashboard, don't commit it"): `GROQ_API_KEY`, `SMTP_USERNAME`/`SMTP_PASSWORD`, `IMAP_USERNAME`/`IMAP_PASSWORD`, and `API_KEY` (see below) — set each on **both** the web service and the worker.
-5. Leave `LIVE_SENDING_ENABLED=false` for your first deploy, create a test campaign against the live URL, and read what it drafted before flipping it to `true`.
+| Resource | Role |
+|---|---|
+| `mailer-agent-api` (web service) | The HTTP API. Does not run the scheduler (`RUN_SCHEDULER_IN_PROCESS=false`). `/docs`, `/redoc` and `/openapi.json` are off (`API_DOCS_ENABLED=false`). |
+| `mailer-agent-worker` (background worker) | The scheduler and dispatcher. **Exactly one** instance: the scheduler must run once, not once per API process. |
 
-If you'd rather not use the Blueprint: `Procfile` defines the same two process types (`web` / `worker`) for platforms that read Procfiles directly.
+The database is a **dedicated Supabase project/PostgreSQL owned by the Mailer** (not LeadBoost's database, and not a Render-managed database). Its connection string is supplied out of band as `DATABASE_URL` on **both** services, with the **exact same value**; it is never committed. Both services also start with `LIVE_SENDING_ENABLED=false` and `AUTO_REPLY_ENABLED=false`, and stay that way until a separate, controlled acceptance step.
 
-### Generating the API key
+The full, ordered first-deployment procedure (Supabase connection guidance, credential provisioning, the guarded database migration, verification, linking LeadBoost) is `docs/C13_DEPLOYMENT_RUNBOOK.md` section 0. In outline:
 
-The service accepts any string you set as `API_KEY` — generate a proper random secret rather than a memorable phrase:
+1. Create the dedicated Mailer Supabase project and copy the connection string from **its own Connect screen**. Prefer the direct PostgreSQL connection; if Render cannot reach it, assess the shared session pooler (port 5432). Do not default to the transaction pooler (port 6543).
+2. In Render: **New -> Blueprint**, point it at this repository at the reviewed commit. Render creates the two services; you type the `sync: false` values in the dashboard (the same `DATABASE_URL` and `MAILBOX_ENCRYPTION_KEY` on both; `ORG_KEY_MAP` and `SYSTEM_OPERATOR_API_KEY` on the API only; see below).
+3. Back up / record recovery evidence, run `scripts/migrate_release.sh --status` and `--check-only`, then apply the guarded migration with the required acknowledgement. `init_db()` (which the services run at start) only creates missing tables; it is **not** the canonical migration sequence.
+4. Provision tenant keys and mailboxes **before** pointing LeadBoost at the Mailer.
+
+The services use Render's paid **Starter** plan (`render.yaml`): the free tier spins web services down after 15 minutes and does not offer background workers. If you would rather not use the Blueprint, `Procfile` defines the same two process types (`web` / `worker`) for platforms that read Procfiles directly.
+
+### Credentials for a deployed service
+
+None of these values belong in the repository, a PR, a ticket, chat or a log. Generate them locally and set them only in the provider dashboard.
+
+* **Tenant API keys (`ORG_KEY_MAP`, API only, required).** A JSON object `{"<mailer_tenant_api_key>": "<mailer_org_id>"}`, one key per tenant. Authentication fails closed: with no key source the API refuses to start. The legacy global `API_KEY` is **not** part of this deployment profile (it is accepted as organization `default` on every route, including the integration routes), so do not set it.
+* **Operator key (`SYSTEM_OPERATOR_API_KEY`, API only).** A separate secret, sent as `X-System-Operator-Key`, for the process-wide `/system/config`, `/system/metrics/llm` and `/system/integration/validate` routes. It is **not** a tenant key, must differ from every tenant key (otherwise the API refuses to start), and must never be given to LeadBoost.
+* **Mailbox encryption key (`MAILBOX_ENCRYPTION_KEY`, API and worker).** One Fernet key, the **identical** value on both services, stable forever; keep an offline copy separate from database backups. Losing or changing it makes stored mailbox credentials unreadable.
+* **Sender identity (`LEADBOOST_INTEGRATION_SENDER_EMAIL`, API).** Required for LeadBoost-generated outreach; while it is empty the first dispatch per organization returns 503.
+
+Generate a random key (tenant or operator) with:
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 # or
 openssl rand -hex 32
 ```
-Set the output as `API_KEY` in Render's environment variables for both services. Every request to this API then requires the header `X-API-Key: <that value>` (comparison is constant-time, so it can't be brute-forced via response-timing). Treat it like any other secret: don't commit it, use a different key per environment (dev/staging/prod), and regenerate it if it's ever exposed the same way you'd rotate an OpenAI/Groq key.
+and an encryption key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Use a different value for every key, and a different set per environment. Keys are compared in constant time. Rotate one the way you would rotate any exposed secret (see `docs/C13_DEPLOYMENT_RUNBOOK.md`).
 
 ## Using this from LeadBoost
 
-Once deployed, this is just another external API — configure it in LeadBoost's `.env` exactly like you would `OPENAI_API_KEY` or `GROQ_API_KEY`:
-```bash
-# LeadBoost's .env
-MAILER_AGENT_BASE_URL=https://mailer-agent-api.onrender.com
-MAILER_AGENT_API_KEY=<the value you generated above>
-```
-Then, in LeadBoost's backend, add a thin HTTP client instead of importing anything from this repo:
-```python
-# core/infrastructure/messaging/mailer_agent_client.py  (new file in LeadBoost)
-import os
-import httpx
+LeadBoost already contains the client for this service; follow it as implemented. **Do not write a second client**, and do not use the old campaign-based flow (`POST /campaigns`, `/campaigns/{id}/leads/ingest`) for the LeadBoost integration. The code is `core/infrastructure/mailing_agent/` in the LeadBoost backend (`client.py`, `mailbox_client.py`, `conversation_client.py`, and its `CONTRACT.md`).
 
-BASE_URL = os.getenv("MAILER_AGENT_BASE_URL")
-API_KEY = os.getenv("MAILER_AGENT_API_KEY")
-HEADERS = {"X-API-Key": API_KEY}
+### Configuration
 
-def ensure_campaign_for_org(organization) -> int:
-    """Create (once) or reuse a Mailer Agent campaign_id for this LeadBoost org."""
-    # Store the returned id on Organization (a new nullable column,
-    # e.g. mailer_agent_campaign_id) the first time this runs for an org.
-    resp = httpx.post(f"{BASE_URL}/campaigns", headers=HEADERS, json={
-        "name": f"{organization.name} outreach",
-        "sender_name": organization.sender_name,       # whatever LeadBoost already
-        "sender_org": organization.name,                 # collects for this org
-        "sender_email": organization.sender_email,
-        "value_prop": organization.value_prop,
-        "follow_up_days": [3, 7, 14],
-    })
-    resp.raise_for_status()
-    return resp.json()["id"]
+LeadBoost (deployed on Railway) reads exactly two variables:
 
-def send_lead_to_mailer_agent(campaign_id: int, lead) -> dict:
-    """Push one LeadBoost Lead row as-is -- the ingestion endpoint
-    understands its field names directly, no mapping needed."""
-    resp = httpx.post(
-        f"{BASE_URL}/campaigns/{campaign_id}/leads/ingest",
-        headers=HEADERS,
-        json={"leads": [{
-            "company_name": lead.company_name, "website": lead.website,
-            "industry": lead.industry, "about_text": lead.about_text,
-            "contact_name": lead.contact_name, "contact_title": lead.contact_title,
-            "email": lead.email, "employees": lead.employees,
-            "revenue_band": lead.revenue_band, "qualification_label": lead.qualification_label,
-            "score": lead.score,
-        }]},
-    )
-    resp.raise_for_status()
-    return resp.json()
-```
-Call `send_lead_to_mailer_agent(...)` from `graph_nodes.py`'s `message_generation` stage (the exact spot that currently calls `MessagingAgent.run()`) — the practical effect is LeadBoost stops generating its own `outreach_message` text and instead hands the raw, real lead facts to this service, which does the drafting *and* the sending *and* the follow-up/reply handling that LeadBoost never had.
+| LeadBoost variable | Meaning |
+|---|---|
+| `MAILING_AGENT_BASE_URL` | The Mailer API base URL: `https://<mailer-api-host>` (the real deployed HTTPS URL; there is no verified production hostname yet, so use your own placeholder until it exists). It must be `https://`, or `http://` to a loopback host only. Redirects are not followed. |
+| `MAILING_AGENT_ORG_API_KEYS` | JSON `{"<leadboost_org_id>": "<mailer_tenant_api_key>"}`: one Mailer key per LeadBoost organization. No key for an organization means LeadBoost fails closed for it (`mailing_agent_auth_not_configured`). |
 
-### What to delete/deprecate in LeadBoost once this is wired in
-- `application/agents/messaging_agent.py`'s LLM-drafting call — replaced by the send above (you can keep the file as a thin wrapper around `send_lead_to_mailer_agent`, or remove it and call the client directly from `graph_nodes.py`).
-- `core/infrastructure/messaging/messenger.py` — no longer needed; sending now happens in this separate service.
-- The `mailto:` button in `outreach-card.tsx` — replace with a status readout of what this service's `/contacts/{id}/thread` reports (sent / awaiting reply / replied), since sending is no longer something the LeadBoost user does by hand.
-- `Lead.outreach_message` — can stay as a historical/read-only field, or be dropped in a later migration once you're confident nothing still reads it.
+The Mailer holds the **inverse** mapping in `ORG_KEY_MAP`: `{"<mailer_tenant_api_key>": "<mailer_org_id>"}`. The two mappings must agree: the key LeadBoost sends for an organization must map, on the Mailer, to the Mailer organization that owns that organization's mailbox. The Mailer derives the organization **from the key only**; LeadBoost never sends an organization id in a request body.
 
+These calls are **server-to-server only**. Neither the Mailer URL nor any key belongs in a public frontend configuration; the browser talks only to LeadBoost. A Mailer tenant key is **not** `SYSTEM_OPERATOR_API_KEY`, and the operator key is never used by LeadBoost. The legacy `MAILING_AGENT_API_KEY` is no longer read, and a single shared key is not supported.
 
+### What LeadBoost calls
+
+All requests carry `X-API-Key: <tenant key>`.
+
+| Call | Purpose |
+|---|---|
+| `POST /mailboxes` | Create the organization's mailbox (always `ACTIVE`). Body: `email_address`, `smtp_host`, `smtp_port`, `smtp_use_tls` (always `true`: STARTTLS only; no implicit-TLS path), `smtp_username`, `smtp_password`. `409` if `(organization, email_address)` already exists. |
+| `GET /mailboxes` | List the organization's mailboxes (adopt an existing one after a `409` or a lost response). |
+| `PATCH /mailboxes/{reference}` | Disable (`{"status":"disabled"}`) or atomically re-activate with new transport settings and credential. |
+| `POST /integrations/leadboost/outreach-requests` | Submit one authorized outreach action. Strict body: `external_action_id`, `idempotency_key`, optional `correlation_id`, `recipient` (`email`, optional `name`/`title`/`company`) and `context` (`value_proposition`, `recipient_facts`). Answers `202` with `accepted` and a reference. Nothing is generated or sent synchronously. |
+| `GET /integrations/leadboost/outreach-actions/{idempotency_key}/conversation?limit=N` | Read-only delivery state and conversation (the key is percent-encoded). Exposed to users only through LeadBoost's own endpoint. |
+
+Per-mailbox SMTP (and optional IMAP) credentials are encrypted in Mailer storage with `MAILBOX_ENCRYPTION_KEY` and are write-only: they never appear in responses. LeadBoost sends SMTP credentials only through mailbox provisioning, never on dispatch, and does not send IMAP fields (inbound is configured through the Mailer API with the organization's key; `PATCH /mailboxes/{reference}` accepts an all-or-none IMAP set). The process-level `SMTP_*` / `IMAP_*` variables are for the **legacy** non-integrated path only. They are deliberately not declared in the new production Render Blueprint; add them manually to the relevant service only if that legacy path is deliberately enabled. The integrated flow never reads them.
+
+### Sending readiness
+
+* **Exactly one `ACTIVE` mailbox per organization.** With none, or with more than one, the outreach request answers `409` before any row is created, and LeadBoost reports `mailing_agent_conflict`. A `409` also covers an idempotency key reused for a different operation and a recipient with an active follow-up.
+* LeadBoost only provisions a mailbox as `ACTIVE` when its own email account is active **and** verified, and only dispatches once its sync state is `synced`.
+* `LEADBOOST_INTEGRATION_SENDER_EMAIL` must be set on the Mailer API; while it is empty, the first outreach request for an organization answers `503`.
+* The Mailer **worker** must be running with `MAILBOX_ENCRYPTION_KEY` and `LIVE_SENDING_ENABLED=true` for anything to leave: with `LIVE_SENDING_ENABLED=false` queued dispatches are failed pre-SMTP rather than held (see `docs/C13_DEPLOYMENT_RUNBOOK.md` section 7). A new deployment keeps it `false` until the controlled acceptance step.
+* Delivery is idempotent. An outcome the Mailer cannot prove stays `UNKNOWN` and is never resent automatically.
+
+Full wire contracts: `docs/LEADBOOST_L1_MAILBOX_CONTRACT.md` (this repository) and `core/infrastructure/mailing_agent/CONTRACT.md` (LeadBoost).
 
 ## Deliverability & compliance — do this before any real-volume sending
 
@@ -268,6 +263,6 @@ This document intentionally doesn't re-derive cold-email deliverability basics �
 
 ## What's intentionally out of scope for v1
 
-- **Multi-tenant sending identities** — this service assumes one mailbox per campaign, configured via env vars. If LeadBoost needs *each of its own customers* to send from their own verified domain, that's a real feature (per-org SMTP credentials + domain verification), not a config tweak — worth a follow-up build once the core agent behavior is validated.
+- **Domain verification and per-tenant campaign sender identity** — the legacy (non-integrated) campaign path assumes one mailbox per campaign, configured via env vars. The integrated LeadBoost path has per-organization mailboxes with encrypted credentials (see "Using this from LeadBoost"), but the campaign sender identity for generated outreach is still deployment-wide (`LEADBOOST_INTEGRATION_SENDER_EMAIL`), and sending-domain verification is not built.
 - **Provider bounce webhooks** — the inbound-email webhook (above) covers replies; hard bounces from providers that don't deliver a bounce-notification email back to the monitored inbox in a parseable way aren't wired to `SuppressionEntry` yet. If you move off raw SMTP to a transactional provider (SES/Resend/Mailgun), wire their bounce webhook into a new `POST /webhooks/bounce` next — same pattern as `webhooks/inbound-email`.
 - **A/B testing / analytics dashboard** — every send/reply is logged with enough detail (`message_type`, `detected_intent`, `source` in the drafting result) to build this on top; it's not wired into a reporting endpoint yet.
