@@ -1,0 +1,94 @@
+name: Mirror CI-verified main to Render repository
+
+# Run only after the canonical repository's full "CI" workflow completes.
+# The target repository will also run CI after the mirrored push; this job
+# skips there so it cannot mirror back into itself.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+# The source repository's built-in token only needs to read this repository.
+# Target write access is supplied separately through RENDER_MIRROR_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-render-repository-main
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Fast-forward Render repository main
+    if: github.repository == 'anupamkr1708/LeadBoost-mail-agent' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the exact CI-verified source commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the checked-out source revision
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
+            echo "STOP: checked-out SHA differs from the CI-verified SHA." >&2
+            exit 1
+          fi
+
+          echo "Validated the exact successful CI revision: $actual_sha"
+
+      - name: Fast-forward the Render-connected repository
+        env:
+          RENDER_MIRROR_TOKEN: ${{ secrets.RENDER_MIRROR_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RENDER_MIRROR_TOKEN:-}" ]]; then
+            echo "STOP: repository secret RENDER_MIRROR_TOKEN is missing." >&2
+            exit 1
+          fi
+
+          target_url="https://github.com/anonymous-martin/LeadBoost-mail-agent.git"
+          source_sha="$(git rev-parse HEAD)"
+
+          # Keep the credential out of the remote URL and do not print the
+          # encoded header. This script never echoes either form.
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$RENDER_MIRROR_TOKEN" | base64 | tr -d '\n')"
+
+          # Fetch only the target main ref. Never force-push or delete branches.
+          git -c "http.https://github.com/.extraheader=${auth_header}" \
+            fetch --no-tags "$target_url" \
+            refs/heads/main:refs/remotes/render-target/main
+
+          target_sha="$(git rev-parse refs/remotes/render-target/main)"
+
+          if [[ "$target_sha" == "$source_sha" ]]; then
+            echo "Target main already matches the CI-verified source commit."
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$target_sha" "$source_sha"; then
+            # Target is behind the validated source: a normal fast-forward push.
+            git -c "http.https://github.com/.extraheader=${auth_header}" \
+              push "$target_url" "$source_sha:refs/heads/main"
+            echo "Mirrored CI-verified source commit $source_sha to target main."
+          elif git merge-base --is-ancestor "$source_sha" "$target_sha"; then
+            # A later successful run already updated target main.
+            echo "Target main already contains this source commit; no update needed."
+          else
+            echo "STOP: canonical main and target main have diverged." >&2
+            echo "No push was made. Reconcile target main manually; do not force-push." >&2
+            exit 1
+          fi
