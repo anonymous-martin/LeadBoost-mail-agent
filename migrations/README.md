@@ -122,7 +122,10 @@ work-queue indexes.
 
 **Deployment note:** none of these scripts are
 run automatically by this repo's `render.yaml` -- its `buildCommand` only
-installs dependencies. Until a pre-deploy migration step is added (tracked
+installs dependencies, and the Blueprint provisions no database (the production
+database is a dedicated external Supabase PostgreSQL supplied as `DATABASE_URL`;
+see `docs/C13_DEPLOYMENT_RUNBOOK.md` section 0 for the first-deployment procedure).
+Until a pre-deploy migration step is added (tracked
 separately), apply new migrations manually, in the order above, before
 deploying application code that depends on them -- in particular, deploying
 the Phase C integration endpoint without first running `004_...py` (or the
@@ -154,15 +157,25 @@ Migrations are never run by the API or the worker; run them as a one-off
 release step, **before** deploying code that needs the new schema.
 
 1. **Back up** the target database and verify the backup restores.
+   *First bootstrap of a new, empty dedicated database:* there is no application data
+   to back up. Do not claim one exists; record the evidence that does (the `--status`
+   output showing the empty state and the provider's own recovery capability, as verified by
+   the operator). The apply acknowledgement in step 6 is still required and is never
+   bypassed (`docs/C13_DEPLOYMENT_RUNBOOK.md` section 0.4).
 2. Suspend the Mailer **worker** and let it drain (see
    `docs/C13_DEPLOYMENT_RUNBOOK.md`, "Pause / resume"). Do not use
    `LIVE_SENDING_ENABLED=false` to pause: it FAILs queued dispatches.
+   *First bootstrap:* there is no queue, so nothing is drained and nothing should be
+   recorded as drained.
 3. Export the target (never printed in full by the tool):
    `export DATABASE_URL='postgresql://...'`
 4. `scripts/migrate_release.sh --status` -- read-only schema-marker report.
 5. `scripts/migrate_release.sh --check-only` -- every guard, no changes.
 6. `MIGRATE_CONFIRM_BACKUP=I_HAVE_A_VERIFIED_BACKUP_OF_<database name> scripts/migrate_release.sh`
 7. Deploy the new API and worker revision together, then resume the worker.
+
+A database that has only had `init_db()` (the services run it at every start) is **not**
+migrated; the wrapper always runs `init_db()` and then the 11 steps, in order.
 
 The tool refuses a missing/SQLite/non-PostgreSQL URL, an unacknowledged apply,
 and (migration 007) an upgrade that would strand non-terminal dispatches. It

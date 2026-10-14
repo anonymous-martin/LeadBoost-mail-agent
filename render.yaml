@@ -1,22 +1,27 @@
-# Render Blueprint. In the Render dashboard: New -> Blueprint -> point at
-# this repo, and Render provisions all three resources below together with
-# the env vars wired between them automatically.
+# Render Blueprint -- Mailer Agent, first production deployment.
 #
-# You still need to fill in secrets (GROQ_API_KEY, SMTP_*, IMAP_*, API_KEY)
-# in the Render dashboard after the first deploy -- see the README's
-# "Deploying to Render" section for exactly which ones and how to generate
-# API_KEY.
-
-databases:
-  - name: mailer-agent-db
-    plan: starter          # paid tier -- free Postgres on Render is deleted
-                            # after ~30 days and isn't meant for production
-    databaseName: mailer_agent
-    user: mailer_agent
+# This manifest creates exactly TWO Render resources:
+#   * mailer-agent-api     web service (HTTP API, no scheduler)
+#   * mailer-agent-worker  background worker (the one and only scheduler / dispatcher)
+#
+# It deliberately does NOT provision a database. The production database is a
+# DEDICATED Supabase project/PostgreSQL owned by the Mailer (never LeadBoost's
+# database). Its connection string is supplied out of band in the Render
+# dashboard (`sync: false`): it must be copied from that project's own Connect
+# screen and set to the EXACT SAME value on BOTH services. Never put it, a
+# password, or any other secret in this file. See docs/C13_DEPLOYMENT_RUNBOOK.md
+# section 0 ("First deployment") for the full procedure, including the guarded
+# database migration that must be run BEFORE live traffic is allowed.
+#
+# Every `sync: false` below is a value the operator types into the dashboard
+# when the Blueprint is created (or afterwards). Nothing here generates secrets:
+# in particular MAILBOX_ENCRYPTION_KEY is NOT `generateValue`d, because Render
+# would generate an independent value per service and the two must be identical.
 
 services:
   - type: web
     name: mailer-agent-api
+    region: singapore
     runtime: python
     plan: starter           # paid tier -- avoids the 15-min free-tier spin-down
     buildCommand: pip install -r requirements.txt
@@ -24,44 +29,46 @@ services:
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: mailer-agent-db
-          property: connectionString
+        sync: false           # Mailer's dedicated Supabase PostgreSQL URL, copied from that project's
+                              # Connect screen. SAME value as on mailer-agent-worker. Never LeadBoost's
+                              # database. Never commit it. See runbook section 0.
       - key: RUN_SCHEDULER_IN_PROCESS
-        value: "false"       # the separate background worker below owns the scheduler
+        value: "false"        # the separate background worker below owns the scheduler
       - key: LIVE_SENDING_ENABLED
-        value: "false"        # flip to true only after reviewing draft output
+        value: "false"        # stays false until the separate controlled acceptance step
       - key: AUTO_REPLY_ENABLED
-        value: "false"
-      - key: API_KEY
-        sync: false           # set manually in the dashboard -- see README
+        value: "false"        # stays false until the separate controlled acceptance step
+      - key: API_DOCS_ENABLED
+        value: "false"        # /docs, /redoc and /openapi.json answer 404; when enabled they are unauthenticated
       - key: MAILBOX_ENCRYPTION_KEY
         sync: false           # Fernet key for mailbox SMTP/IMAP credentials. Set the SAME value
                               # on mailer-agent-api and mailer-agent-worker; losing or changing it
-                              # makes stored mailbox credentials unreadable. See README.
+                              # makes stored mailbox credentials unreadable. Keep an offline backup
+                              # separate from the database backup. See runbook section 4.
       - key: ORG_KEY_MAP
-        sync: false           # JSON {"<api_key>":"<org_id>"}: one key per tenant (LeadBoost L1 needs one
-                              # per LeadBoost organization). API service only. Never commit values.
+        sync: false           # JSON {"<mailer_tenant_api_key>":"<mailer_org_id>"}: one key per tenant
+                              # (LeadBoost holds the inverse map per LeadBoost organization). API service
+                              # only. REQUIRED: with no key the API refuses to start. Never commit values.
+                              # The legacy global API_KEY is intentionally NOT declared in this profile.
+      - key: SYSTEM_OPERATOR_API_KEY
+        sync: false           # Operator-only credential for /system/config, /system/metrics/llm and
+                              # /system/integration/validate (X-System-Operator-Key). API service ONLY.
+                              # Must differ from every tenant key or the API refuses to start.
       - key: LEADBOOST_INTEGRATION_SENDER_EMAIL
         sync: false           # REQUIRED for LeadBoost generated outreach: the first dispatch per organization
                               # returns 503 while this is empty (deployment-wide campaign sender identity).
       - key: GROQ_API_KEY
         sync: false
-      - key: SMTP_USERNAME
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: IMAP_USERNAME
-        sync: false
-      - key: IMAP_PASSWORD
-        sync: false
 
   - type: worker
     name: mailer-agent-worker
+    region: singapore
     runtime: python
     plan: starter            # background workers are not available on the free tier
+    numInstances: 1       # Exactly one scheduler/dispatcher worker.
     buildCommand: pip install -r requirements.txt
     startCommand: python worker.py
+    # Exactly ONE worker service, and it must stay at a single instance: it owns the scheduler.
     # worker.py drains in-flight external dispatches for up to
     # EXTERNAL_DISPATCH_SHUTDOWN_DRAIN_SECONDS (25 s by default), then moves any
     # it still owns SENDING -> UNKNOWN and releases claims. Render's default grace
@@ -72,24 +79,14 @@ services:
     maxShutdownDelaySeconds: 60
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: mailer-agent-db
-          property: connectionString
+        sync: false           # EXACTLY the same Mailer Supabase URL as mailer-agent-api. See runbook section 0.
       - key: LIVE_SENDING_ENABLED
-        value: "false"
+        value: "false"        # decides dispatch on the worker; stays false until controlled acceptance
       - key: AUTO_REPLY_ENABLED
         value: "false"
       - key: MAILBOX_ENCRYPTION_KEY
         sync: false           # Fernet key for mailbox SMTP/IMAP credentials. Set the SAME value
                               # on mailer-agent-api and mailer-agent-worker; losing or changing it
-                              # makes stored mailbox credentials unreadable. See README.
+                              # makes stored mailbox credentials unreadable. See runbook section 4.
       - key: GROQ_API_KEY
-        sync: false
-      - key: SMTP_USERNAME
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: IMAP_USERNAME
-        sync: false
-      - key: IMAP_PASSWORD
         sync: false
