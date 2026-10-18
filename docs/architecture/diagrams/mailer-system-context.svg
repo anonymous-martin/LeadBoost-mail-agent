@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1095" width="1100" height="1095" role="img" aria-labelledby="d1-t d1-d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="d1-t">Mailer Agent system context</title>
+<desc id="d1-d">LeadBoost's backend calls the Mailer API server-to-server over HTTPS with a tenant key. The API persists a durable dispatch row in the Mailer-owned PostgreSQL database and answers 202. A separate worker claims dispatches from the database, calls the LLM provider, sends through the mailbox SMTP server, and polls per-mailbox IMAP inboxes. An optional inbound webhook posts replies to the API.</desc>
+<defs>
+<marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+<marker id="a-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f766e"/></marker>
+<marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#15803d"/></marker>
+<marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/></marker>
+<marker id="a-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+<marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b91c1c"/></marker>
+<marker id="a-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/></marker>
+</defs>
+<rect width="1100" height="1095" fill="#ffffff"/>
+<text x="20" y="34" font-size="22" font-weight="bold" fill="#1f2937" text-anchor="start">Mailer Agent: system context</text>
+<text x="20" y="58" font-size="14" font-weight="normal" fill="#6b7280" text-anchor="start">Server-to-server integration. A durable dispatch table decouples the API from the worker.</text>
+<rect x="15" y="80" width="240" height="520" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="30" y="104" font-size="13" font-weight="bold" fill="#6b7280" text-anchor="start">LEADBOOST</text>
+<text x="30" y="122" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">separate system</text>
+<rect x="35" y="140" width="200" height="84" rx="8" fill="#ffffff" stroke="#64748b" stroke-width="1.5"/>
+<text x="135" y="168" font-size="15" font-weight="bold" fill="#1f2937" text-anchor="middle">Browser / frontend</text>
+<text x="135" y="190" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">talks only to LeadBoost</text>
+<text x="135" y="208" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">holds no Mailer URL or key</text>
+<rect x="35" y="290" width="200" height="180" rx="8" fill="#ffffff" stroke="#64748b" stroke-width="1.5"/>
+<text x="135" y="318" font-size="15" font-weight="bold" fill="#1f2937" text-anchor="middle">LeadBoost backend</text>
+<text x="135" y="344" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="middle">discovery and scraping</text>
+<text x="135" y="364" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="middle">lead qualification / scoring</text>
+<text x="135" y="384" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="middle">authorizes the outreach action</text>
+<text x="135" y="404" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="middle">stores one Mailer key per org</text>
+<text x="135" y="424" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="middle">(server-side only)</text>
+<polyline points="135,224 135,290" fill="none" stroke="#6b7280" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#a-grey)"/>
+<text x="145" y="262" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">user actions</text>
+<rect x="35" y="510" width="200" height="66" rx="8" fill="#fffbeb" stroke="#b45309" stroke-width="1.3"/>
+<text x="135" y="535" font-size="12.5" font-weight="normal" fill="#b45309" text-anchor="middle">Mailer URL and keys never</text>
+<text x="135" y="552" font-size="12.5" font-weight="normal" fill="#b45309" text-anchor="middle">enter frontend bundles or</text>
+<text x="135" y="569" font-size="12.5" font-weight="normal" fill="#b45309" text-anchor="middle">NEXT_PUBLIC_* variables</text>
+<rect x="395" y="80" width="420" height="740" rx="10" fill="#f5f9ff" stroke="#2563eb" stroke-width="1.8"/>
+<text x="410" y="104" font-size="13" font-weight="bold" fill="#2563eb" text-anchor="start">MAILER AGENT</text>
+<text x="410" y="122" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">this repository</text>
+<rect x="420" y="140" width="370" height="135" rx="8" fill="#ffffff" stroke="#2563eb" stroke-width="1.8"/>
+<text x="605" y="166" font-size="16" font-weight="bold" fill="#1f2937" text-anchor="middle">Mailer API</text>
+<text x="605" y="185" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">FastAPI + Gunicorn, Render web service</text>
+<text x="605" y="210" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">X-API-Key resolves the organization</text>
+<text x="605" y="230" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">validate, resolve the ACTIVE mailbox</text>
+<text x="605" y="250" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">persist dispatch, answer 202</text>
+<text x="605" y="270" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">read-only state and conversation</text>
+<rect x="420" y="345" width="370" height="175" rx="8" fill="#ffffff" stroke="#0f766e" stroke-width="1.8"/>
+<text x="605" y="371" font-size="16" font-weight="bold" fill="#1f2937" text-anchor="middle">Mailer-owned PostgreSQL</text>
+<text x="605" y="390" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">dedicated Supabase project</text>
+<rect x="440" y="405" width="330" height="56" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
+<text x="605" y="428" font-size="14.5" font-weight="bold" fill="#1f2937" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">external_dispatches</text>
+<text x="605" y="448" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">durable dispatch, UNIQUE(org, idempotency_key)</text>
+<text x="605" y="488" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">mailboxes (Fernet ciphertext), messages, contacts</text>
+<rect x="420" y="575" width="370" height="220" rx="8" fill="#ffffff" stroke="#0f766e" stroke-width="1.8"/>
+<text x="605" y="601" font-size="16" font-weight="bold" fill="#1f2937" text-anchor="middle">Mailer worker</text>
+<text x="605" y="620" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">python worker.py, exactly one instance</text>
+<text x="605" y="648" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">APScheduler jobs:</text>
+<text x="605" y="668" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">generate (LLM), send (SMTP),</text>
+<text x="605" y="688" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">lease recovery, IMAP poll</text>
+<text x="605" y="708" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">claims: FOR UPDATE SKIP LOCKED</text>
+<text x="605" y="728" font-size="13.5" font-weight="normal" fill="#1f2937" text-anchor="middle">plus lease and ownership fence</text>
+<rect x="915" y="140" width="170" height="84" rx="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.4" stroke-dasharray="6 5"/>
+<text x="1000" y="168" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">Inbound-parse</text>
+<text x="1000" y="187" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">provider (optional)</text>
+<text x="1000" y="206" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">webhook</text>
+<rect x="915" y="600" width="170" height="60" rx="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.4"/>
+<text x="1000" y="626" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">LLM provider</text>
+<text x="1000" y="645" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">Groq: draft generation</text>
+<rect x="915" y="680" width="170" height="60" rx="8" fill="#ffffff" stroke="#15803d" stroke-width="1.6"/>
+<text x="1000" y="706" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">SMTP server</text>
+<text x="1000" y="725" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">per mailbox, STARTTLS</text>
+<rect x="915" y="760" width="170" height="60" rx="8" fill="#ffffff" stroke="#7c3aed" stroke-width="1.6"/>
+<text x="1000" y="786" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">IMAP server</text>
+<text x="1000" y="805" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="middle">per-mailbox inbox</text>
+<polyline points="235,340 325,340 325,175 420,175" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<circle cx="325" cy="258" r="12" fill="#2563eb"/><text x="325" y="263" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">1</text>
+<polyline points="420,245 360,245 360,440 235,440" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<circle cx="360" cy="340" r="12" fill="#2563eb"/><text x="360" y="345" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">8</text>
+<polyline points="605,275 605,345" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<circle cx="605" cy="310" r="12" fill="#2563eb"/><text x="605" y="315" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">2</text>
+<text x="622" y="315" font-size="12.5" font-weight="normal" fill="#2563eb" text-anchor="start">persist, then 202</text>
+<polyline points="700,575 700,520" fill="none" stroke="#0f766e" stroke-width="2.6" stroke-linejoin="round" marker-start="url(#a-teal)" marker-end="url(#a-teal)"/>
+<circle cx="735" cy="548" r="12" fill="#0f766e"/><text x="735" y="553" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">3</text>
+<text x="753" y="553" font-size="12.5" font-weight="normal" fill="#0f766e" text-anchor="start">async, via the table</text>
+<polyline points="790,630 915,630" fill="none" stroke="#6b7280" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-grey)"/>
+<circle cx="852" cy="618" r="12" fill="#6b7280"/><text x="852" y="623" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">4</text>
+<polyline points="790,710 915,710" fill="none" stroke="#15803d" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-green)"/>
+<circle cx="852" cy="698" r="12" fill="#15803d"/><text x="852" y="703" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">5</text>
+<polyline points="915,790 790,790" fill="none" stroke="#7c3aed" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-purple)"/>
+<circle cx="852" cy="778" r="12" fill="#7c3aed"/><text x="852" y="783" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">6</text>
+<polyline points="915,182 790,182" fill="none" stroke="#7c3aed" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round" marker-end="url(#a-purple)"/>
+<circle cx="852" cy="168" r="12" fill="#7c3aed"/><text x="852" y="173" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">7</text>
+<text x="852" y="205" font-size="12" font-weight="normal" fill="#7c3aed" text-anchor="middle">POST</text>
+<rect x="15" y="850" width="1070" height="230" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1"/>
+<circle cx="36" cy="874" r="12" fill="#2563eb"/><text x="36" y="879" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">1</text>
+<text x="56" y="879" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">LeadBoost submits one authorized action: POST /integrations/leadboost/outreach-requests (HTTPS, tenant X-API-Key).</text>
+<circle cx="36" cy="899" r="12" fill="#2563eb"/><text x="36" y="904" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">2</text>
+<text x="56" y="904" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">The API commits the durable dispatch row and idempotency key, then answers 202. It calls neither the worker nor the LLM.</text>
+<circle cx="36" cy="924" r="12" fill="#0f766e"/><text x="36" y="929" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">3</text>
+<text x="56" y="929" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">The worker claims queued rows (SKIP LOCKED, lease, fence) and writes fenced outcomes. The table is the only link to the API.</text>
+<circle cx="36" cy="949" r="12" fill="#6b7280"/><text x="36" y="954" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">4</text>
+<text x="56" y="954" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">The worker drafts the message with the LLM provider; no database transaction is open during the call.</text>
+<circle cx="36" cy="974" r="12" fill="#15803d"/><text x="36" y="979" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">5</text>
+<text x="56" y="979" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">The worker sends through the mailbox's SMTP server; no database transaction is open during the call.</text>
+<circle cx="36" cy="999" r="12" fill="#7c3aed"/><text x="36" y="1004" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">6</text>
+<text x="56" y="1004" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">The worker polls each mailbox's IMAP inbox; replies are bound to that mailbox's organization.</text>
+<circle cx="36" cy="1024" r="12" fill="#7c3aed"/><text x="36" y="1029" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">7</text>
+<text x="56" y="1029" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">Optional: an inbound-parse provider posts replies to POST /webhooks/inbound-email with a tenant key (dashed).</text>
+<circle cx="36" cy="1049" r="12" fill="#2563eb"/><text x="36" y="1054" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">8</text>
+<text x="56" y="1054" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">LeadBoost reads state through the read-only GET /integrations/leadboost/outreach-actions/{key}/conversation (dashed).</text>
+<text x="30" y="1074" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start" font-style="italic">Reference topology (render.yaml): worker on Render. Observed deployment: API on Render, worker on Railway, database on Supabase.</text>
+</svg>

@@ -1,5 +1,7 @@
 # LeadBoost L1 — Mailbox provisioning contract (Mailer side)
 
+See also: [API_AND_INTEGRATION.md](API_AND_INTEGRATION.md) for the end-to-end workflow, and [SECURITY_AND_SECRETS.md](SECURITY_AND_SECRETS.md) for key handling.
+
 LeadBoost is the customer-facing control plane; Mailer owns the mailbox
 (send-time credential, SMTP execution). L1 adds **no new endpoint** and does not
 touch the M2 generated-outreach request (`POST /integrations/leadboost/outreach-requests`,
