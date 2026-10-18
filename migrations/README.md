@@ -1,5 +1,7 @@
 # Migrations
 
+Release and deployment context: [docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md#4-release-sequence). Schema design context: [docs/architecture/SYSTEM_DESIGN.md](../docs/architecture/SYSTEM_DESIGN.md#4-the-durable-dispatch-table).
+
 This project does not use Alembic for schema migrations, even though
 `alembic` is listed in requirements.txt (it isn't currently wired up --
 there is no `alembic/versions` directory). Introducing Alembic now, against
@@ -119,6 +121,10 @@ work-queue indexes.
     `--downgrade` that refuses to run if a Message-ID is now stored more than
     once. SQLite note: an inline UNIQUE from pre-M3 `CREATE TABLE` cannot be
     dropped there -- recreate development databases from the models.
+
+**Wrapper evidence.** The guarded wrapper `scripts/migrate_release.sh` (with `--status` and `--check-only`) is covered in CI against a disposable PostgreSQL by `tests/test_migrate_release.py`. It has also been run against the dedicated Supabase database: all 11 steps completed and the final `--status` reported the expected markers present (operator-reported). A code deployment and a migration are separate release actions: the wrapper is never run by startup or by every deploy.
+
+**Startup race.** `init_db()` (create-missing-tables) runs at API and worker start. Two processes starting together against an empty database produced a duplicate-sequence error once on hosted infrastructure; a later start recovered. Run the wrapper once, before starting both services, until that race is hardened.
 
 **Deployment note:** none of these scripts are
 run automatically by this repo's `render.yaml` -- its `buildCommand` only

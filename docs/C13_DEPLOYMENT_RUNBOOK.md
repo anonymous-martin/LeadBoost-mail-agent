@@ -2,14 +2,39 @@
 
 Scope: how the Mailer API, the Mailer worker and the Mailer-owned PostgreSQL
 are first deployed, then configured, migrated, paused, rolled back and checked.
-**No Mailer resource exists yet.** The intended production architecture is:
-LeadBoost stays on Railway; the Mailer API runs as a Render web service;
-**exactly one** Mailer worker runs as a Render background worker; the Mailer uses
-a **dedicated Supabase project/PostgreSQL** (not LeadBoost's database, and not a
-Render-managed database). Section 0 is the first-deployment procedure; the rest
-is the steady-state contract. It changes no delivery logic. Nothing here was
-executed against a live deployment; see "Evidence" at the end for what is proven
-and how.
+It changes no delivery logic. A shorter overview is in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+**Two topologies are described here and they are not the same.**
+
+* **Reference topology (`render.yaml`):** LeadBoost stays on Railway; the Mailer
+  API runs as a Render web service; **exactly one** Mailer worker runs as a Render
+  background worker; the Mailer uses a **dedicated Supabase PostgreSQL** (not
+  LeadBoost's database, and not a Render-managed database). Section 0 is the
+  first-deployment procedure for it; the rest is the steady-state contract.
+* **Observed deployment (split-provider staging/demo):** the API is deployed on
+  Render at `https://mailer-agent-api.onrender.com`; the worker has been run as a
+  Railway service with `python worker.py`; the database is the dedicated Supabase
+  project. A separate Railway service named `web` (a Gunicorn API process, from the
+  repository `Procfile`) has also been seen. It is not part of the intended
+  topology; its removal is **unconfirmed**. Treat the deployment as staging/demo
+  unless newer dashboard evidence says otherwise.
+
+**What has actually been done, and what has not.** Steps marked *performed* are
+operator-reported or observed on the hosted services; everything else in this
+document is an instruction for future deployments.
+
+| Step | Status |
+|---|---|
+| Dedicated Supabase project reached over its session pooler (from a WSL shell) | Performed, `HOSTED OBSERVED` |
+| Canonical migration wrapper run: all 11 steps completed; final `--status` reported the expected markers present | Performed, operator-reported terminal observation |
+| Mailer API deployed on Render; `GET /health` returned 200; `GET /metrics` returned 404. The API runs `init_db()` before serving (a failure stops startup), so this is consistent with a successful database connection at startup; `/health` itself does not probe the database | Performed, `HOSTED OBSERVED` |
+| Worker running on Railway: APScheduler started and scheduled dispatch/generation jobs executed (worker logs); observed database use at runtime, not evidence of a dispatch being sent | Performed, `HOSTED OBSERVED` |
+| Railway project is on a Limited Trial; outbound SMTP from the worker may be restricted on that plan and the permitted networking and sending path has not been verified | Current deployment caveat; SMTP connectivity from the Railway worker is `NOT VERIFIED` |
+| Python 3.12 runtime pin: CI succeeded on the canonical-mirror target repository (run `38626064792`, commit `ce0cbfa`) | `CI VERIFIED` |
+| First `init_db()` startup of two processes against the database | A duplicate-sequence error was observed once; a later startup recovered. The race is **not fixed** (`DEFERRED`) |
+| Worker deployed through the Render Blueprint | Not performed (the worker runs on Railway) |
+| Removal of the redundant Railway `web` service | Unconfirmed |
+| Controlled acceptance: deployed request, dispatch lifecycle and receipt of one message | **Not performed.** Hosted end-to-end delivery is `NOT VERIFIED` |
 
 Frozen invariants this runbook must never conflict with: `ExternalDispatch` is the
 durable queue; claims use `FOR UPDATE SKIP LOCKED` + lease/fencing; Txn B -> SMTP
@@ -20,8 +45,8 @@ expired `SENDING` becomes `UNKNOWN`, never `QUEUED`; ambiguous outcomes stay
 ## 0. First deployment (new Render services + dedicated Supabase project)
 
 Everything in this section is an **operator action in provider dashboards and
-shells**. The repository change that introduced it created, configured, migrated
-and deployed nothing. Read sections 1-7 first; this section orders them for a
+shells**. It is the procedure for the reference topology; the status table at the
+top of this document records which parts have actually been carried out. Read sections 1-7 first; this section orders them for a
 first deployment.
 
 ### 0.1 What the Blueprint creates (and does not)
@@ -440,6 +465,8 @@ resuming a worker after a failed migration.
 
 ## 10. Evidence (what is proven, and how)
 
+Labels: `CI VERIFIED`, `LOCAL E2E VERIFIED`, `HOSTED OBSERVED`, `IMPLEMENTED, NOT HOST-VERIFIED`, `NOT VERIFIED`, `KNOWN LIMITATION`, `DEFERRED` (definitions in [FINAL_PRODUCTION_READINESS.md](FINAL_PRODUCTION_READINESS.md)). Rows that say "CI-verified", "CI-tested" or "unit-tested" below refer to the test files named in the row; they are not hosted observations.
+
 | Claim | Status |
 |---|---|
 | Canonical 11-step sequence + `init_db()` first runs cleanly on an empty PostgreSQL 16 and re-runs idempotently; guards refuse unsafe targets; 007 pre-check blocks and changes nothing | CI-verified by `tests/test_migrate_release.py` (disposable DB; required, cannot skip). Also run locally on PostgreSQL 16 |
@@ -451,7 +478,13 @@ resuming a worker after a failed migration.
 | `/docs`, `/redoc`, `/openapi.json` return 404 by default and 200 only with `API_DOCS_ENABLED=true`; `/health` returns exactly `{"status":"ok"}` with 200 | CI-tested by `tests/test_pr2_api_surface.py` (the real app built in a fresh process). **Not** observed on a deployed service |
 | Tenant `/system/health` is organisation-scoped and has no process-wide fields; the three operator routes reject a tenant key / legacy key / missing / wrong operator key, fail closed when unset, and need no tenant key; an operator key equal to a tenant key is refused at start-up; no credential reaches responses or logs | CI-tested by `tests/test_pr3_system_operator_boundary.py` and `tests/test_c15_1_auth_fail_closed.py`; `check_config.py` handling by `tests/test_check_config.py`. **Not** observed on a deployed service, and **no operator key has been provisioned** anywhere |
 | `render.yaml` declares two services and no database; `DATABASE_URL` is `sync: false` on both; `ORG_KEY_MAP`/`SYSTEM_OPERATOR_API_KEY` are API-only secrets; no legacy `API_KEY`; docs, in-process scheduler, live sending and auto-reply pinned `false`; one worker with the shutdown drain; no secret/URL in the file | CI-tested (static, no YAML dependency) by `tests/test_render_blueprint.py` |
-| Dedicated Supabase project, its connection type/reachability from Render, backups/recovery, the migration run on it, live service settings, deployed HTTPS, worker liveness, live key agreement | **Not verified** (operator/dashboard-only; nothing has been created or run) |
+| Dedicated Supabase project reachable over its session pooler; canonical 11-step wrapper run completed with expected markers on `--status` | `HOSTED OBSERVED` (operator-reported terminal observation; pooler reached from a WSL shell, not from Render) |
+| Render API `GET /health` 200; `GET /metrics` 404 (no such route exists) | `HOSTED OBSERVED` |
+| Worker running on Railway: APScheduler started; dispatch and generation jobs executed | `HOSTED OBSERVED` (worker logs) |
+| A concurrent first `init_db()` start produced a duplicate-sequence error once; a later start recovered | `HOSTED OBSERVED`; unresolved and `DEFERRED` until a code change and regression test demonstrate a fix |
+| Outbound SMTP from the Railway worker (Limited Trial caveat) | `NOT VERIFIED` |
+| Backups/recovery of the Supabase project, Render-to-Supabase connection type, deployed HTTPS behavior of fail-closed auth, `/docs` exposure, worker liveness signal, live key agreement between LeadBoost and Mailer, removal of the redundant Railway `web` service | `NOT VERIFIED` (dashboard-only facts; no evidence recorded) |
+| A deployed request through to a received message (hosted end-to-end delivery) | `NOT VERIFIED` (controlled acceptance not performed) |
 
 Deferred: C14 -- deployed HTTPS/worker E2E with disposable SMTP/IMAP. C15 -- deployed
 verification of the C15.1 fail-closed auth change, `/health` and `/docs` exposure, worker liveness, key rotation,

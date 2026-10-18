@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1020" width="1100" height="1020" role="img" aria-labelledby="d3-t d3-d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="d3-t">Dispatch state machine</title>
+<desc id="d3-d">States of ExternalDispatch.state: queued, generating, sending, sent, failed, unknown. Queued with no message generates via generating and returns to queued with a message. Queued with a message is claimed into sending. Sending resolves to sent, failed or unknown. Expired generating returns to queued. Expired sending, ambiguous SMTP outcomes and shutdown drain deadline resolve to unknown, which has no automatic transition out.</desc>
+<defs>
+<marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+<marker id="a-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f766e"/></marker>
+<marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#15803d"/></marker>
+<marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/></marker>
+<marker id="a-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+<marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b91c1c"/></marker>
+<marker id="a-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/></marker>
+</defs>
+<rect width="1100" height="1020" fill="#ffffff"/>
+<text x="20" y="34" font-size="22" font-weight="bold" fill="#1f2937" text-anchor="start">ExternalDispatch state machine</text>
+<text x="20" y="58" font-size="14" font-weight="normal" fill="#6b7280" text-anchor="start">Only states and transitions present in the code. A row is one state at a time; QUEUED is shown with its two meanings.</text>
+<rect x="90" y="120" width="280" height="150" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="2"/>
+<text x="230.0" y="148" font-size="17" font-weight="bold" fill="#0f766e" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">QUEUED</text>
+<text x="230.0" y="172" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">message_id NULL: awaiting generation</text>
+<text x="230.0" y="190" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">message_id set: ready to send</text>
+<text x="230.0" y="208" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">(the send claim takes only set rows)</text>
+<rect x="690" y="120" width="280" height="150" rx="12" fill="#ffffff" stroke="#0f766e" stroke-width="2"/>
+<text x="830.0" y="148" font-size="17" font-weight="bold" fill="#0f766e" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">GENERATING</text>
+<text x="830.0" y="172" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">internal; the API reports it</text>
+<text x="830.0" y="190" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">as "queued"</text>
+<text x="830.0" y="208" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">claimed_at = fencing token</text>
+<rect x="90" y="420" width="280" height="120" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="2"/>
+<text x="230.0" y="448" font-size="17" font-weight="bold" fill="#0f766e" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">SENDING</text>
+<text x="230.0" y="472" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">committed only after every gate</text>
+<text x="230.0" y="490" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">passed and the Message-ID is durable</text>
+<rect x="690" y="400" width="210" height="90" rx="12" fill="#f0fdf4" stroke="#15803d" stroke-width="2"/>
+<text x="795.0" y="428" font-size="17" font-weight="bold" fill="#15803d" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">SENT</text>
+<text x="795.0" y="452" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">SMTP server accepted</text>
+<text x="795.0" y="470" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">the message</text>
+<rect x="690" y="515" width="280" height="90" rx="12" fill="#fef2f2" stroke="#b91c1c" stroke-width="2"/>
+<text x="830.0" y="543" font-size="17" font-weight="bold" fill="#b91c1c" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">FAILED</text>
+<text x="830.0" y="567" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">terminal; a retry is a new</text>
+<text x="830.0" y="585" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">idempotency_key</text>
+<rect x="690" y="640" width="280" height="150" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="3.4"/>
+<text x="830.0" y="668" font-size="20" font-weight="bold" fill="#b45309" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">UNKNOWN</text>
+<text x="830.0" y="692" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">outcome cannot be proven</text>
+<text x="830.0" y="710" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">never re-queued, never auto-resent</text>
+<text x="830.0" y="728" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">operator checks the Sent folder or</text>
+<text x="830.0" y="746" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="middle">provider log for the stored Message-ID</text>
+<circle cx="40" cy="195" r="9" fill="#1f2937"/>
+<polyline points="49,195 90,195" fill="none" stroke="#6b7280" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-grey)"/>
+<text x="16" y="222" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="start">POST</text>
+<text x="16" y="238" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="start">accepted</text>
+<text x="16" y="254" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="start">(202)</text>
+<polyline points="370,160 690,160" fill="none" stroke="#0f766e" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-teal)"/>
+<rect x="381" y="137" width="279" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="385" y="150" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">generation claim (message_id IS NULL)</text>
+<polyline points="690,205 370,205" fill="none" stroke="#0f766e" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-teal)"/>
+<rect x="381" y="183" width="330" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="385" y="196" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">G2: Message inserted, row re-queued (fenced)</text>
+<polyline points="690,245 370,245" fill="none" stroke="#b45309" stroke-width="2.2" stroke-dasharray="7 5" stroke-linejoin="round" marker-end="url(#a-amber)"/>
+<rect x="381" y="223" width="279" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="385" y="236" font-size="13" font-weight="normal" fill="#b45309" text-anchor="start">lease expiry (300 s): sweep re-queues</text>
+<rect x="381" y="250" width="306" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="385" y="262" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">safe: generation has no external side effect</text>
+<polyline points="930,270 930,515" fill="none" stroke="#b91c1c" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-red)"/>
+<text x="944" y="340" font-size="12.5" font-weight="normal" fill="#b91c1c" text-anchor="start">generation refused,</text>
+<text x="944" y="357" font-size="12.5" font-weight="normal" fill="#b91c1c" text-anchor="start">LLM error, or</text>
+<text x="944" y="374" font-size="12.5" font-weight="normal" fill="#b91c1c" text-anchor="start">grounding hard block</text>
+<polyline points="230,270 230,420" fill="none" stroke="#0f766e" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-teal)"/>
+<text x="246" y="335" font-size="13" font-weight="bold" fill="#1f2937" text-anchor="start">send claim (txn B)</text>
+<text x="246" y="354" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="start">FOR UPDATE SKIP LOCKED</text>
+<text x="246" y="372" font-size="12.5" font-weight="normal" fill="#6b7280" text-anchor="start">message_id must be set</text>
+<polyline points="370,445 690,445" fill="none" stroke="#15803d" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-green)"/>
+<text x="395" y="435" font-size="13" font-weight="normal" fill="#15803d" text-anchor="start">SMTP accepted (txn C, fenced)</text>
+<polyline points="370,470 560,470 560,560 690,560" fill="none" stroke="#b91c1c" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#a-red)"/>
+<text x="380" y="490" font-size="12.5" font-weight="normal" fill="#b91c1c" text-anchor="start">pre-SMTP gate (txn B)</text>
+<text x="380" y="507" font-size="12.5" font-weight="normal" fill="#b91c1c" text-anchor="start">or SMTP refusal (txn C)</text>
+<polyline points="370,525 480,525 480,700 690,700" fill="none" stroke="#b45309" stroke-width="3.2" stroke-linejoin="round" marker-end="url(#a-amber)"/>
+<text x="496" y="622" font-size="13" font-weight="bold" fill="#b45309" text-anchor="start">ambiguous SMTP outcome</text>
+<text x="496" y="639" font-size="12.5" font-weight="normal" fill="#b45309" text-anchor="start">send_email raised</text>
+<text x="496" y="656" font-size="12.5" font-weight="normal" fill="#b45309" text-anchor="start">txn C never lands (sweep)</text>
+<text x="496" y="673" font-size="12.5" font-weight="normal" fill="#b45309" text-anchor="start">lease expiry (900 s)</text>
+<text x="496" y="690" font-size="12.5" font-weight="normal" fill="#b45309" text-anchor="start">shutdown drain deadline</text>
+<rect x="20" y="590" width="350" height="150" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text x="32" y="614" font-size="13" font-weight="bold" fill="#1f2937" text-anchor="start">Stays QUEUED (no state change)</text>
+<text x="32" y="636" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">MAILBOX_ENCRYPTION_KEY unset or invalid:</text>
+<text x="32" y="654" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">txn B rolls back, row is retried later.</text>
+<text x="32" y="672" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">Shutdown requested before txn B commits:</text>
+<text x="32" y="690" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">rolled back, left QUEUED.</text>
+<rect x="20" y="815" width="1060" height="150" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2"/>
+<text x="34" y="841" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="start">Invariants</text>
+<text x="34" y="865" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">Claims use FOR UPDATE SKIP LOCKED on PostgreSQL. Every outcome write is fenced on id, organization, state, claimed_by and the exact claimed_at.</text>
+<text x="34" y="887" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">SMTP and the LLM call run with no database session, transaction or lock open. The Message-ID is committed before SMTP is attempted.</text>
+<text x="34" y="909" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">SENT, FAILED and UNKNOWN are terminal: no code path moves a row out of them. A late outcome after lease loss is logged and annotated, never written as state.</text>
+<text x="34" y="931" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">With LIVE_SENDING_ENABLED=false a claimed dispatch becomes FAILED (live_sending_disabled); it is not held and not simulated as sent.</text>
+<text x="20" y="995" font-size="11.5" font-weight="normal" fill="#6b7280" text-anchor="start" font-style="italic">Source: models.ExternalDispatchState, followup/work_claiming.py, mail/external_dispatch_worker.py, mail/outreach_generation_worker.py.</text>
+</svg>

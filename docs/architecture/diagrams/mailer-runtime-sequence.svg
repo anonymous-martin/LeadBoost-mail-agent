@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1175" width="1100" height="1175" role="img" aria-labelledby="d2-t d2-d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="d2-t">Mailer dispatch runtime sequence</title>
+<desc id="d2-d">Sequence from LeadBoost's authorized action to delivery state. Synchronous part: authenticate, validate, persist a durable dispatch, answer 202. Asynchronous part in the worker: generation transaction, LLM call, send claim transaction that persists the Message-ID, SMTP call outside any database transaction, fenced outcome transaction. Ambiguous SMTP outcomes become UNKNOWN and are not resent. LeadBoost reads state through a read-only endpoint.</desc>
+<defs>
+<marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+<marker id="a-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f766e"/></marker>
+<marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#15803d"/></marker>
+<marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/></marker>
+<marker id="a-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+<marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b91c1c"/></marker>
+<marker id="a-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/></marker>
+</defs>
+<rect width="1100" height="1175" fill="#ffffff"/>
+<text x="20" y="34" font-size="22" font-weight="bold" fill="#1f2937" text-anchor="start">Mailer dispatch lifecycle: runtime sequence</text>
+<text x="20" y="58" font-size="14" font-weight="normal" fill="#6b7280" text-anchor="start">Accepted, queued, claimed, SMTP attempted, SMTP accepted and recipient receipt are different events.</text>
+<line x1="105" y1="130" x2="105" y2="1115" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 5"/>
+<rect x="40" y="80" width="130" height="50" rx="8" fill="#ffffff" stroke="#64748b" stroke-width="1.8"/>
+<text x="105" y="102" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">LeadBoost</text>
+<text x="105" y="120" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">backend</text>
+<line x1="285" y1="130" x2="285" y2="1115" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 5"/>
+<rect x="220" y="80" width="130" height="50" rx="8" fill="#ffffff" stroke="#2563eb" stroke-width="1.8"/>
+<text x="285" y="102" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">Mailer</text>
+<text x="285" y="120" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">API</text>
+<line x1="480" y1="130" x2="480" y2="1115" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 5"/>
+<rect x="415" y="80" width="130" height="50" rx="8" fill="#ffffff" stroke="#0f766e" stroke-width="1.8"/>
+<text x="480" y="102" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">PostgreSQL</text>
+<text x="480" y="120" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">(Mailer-owned)</text>
+<line x1="675" y1="130" x2="675" y2="1115" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 5"/>
+<rect x="610" y="80" width="130" height="50" rx="8" fill="#ffffff" stroke="#0f766e" stroke-width="1.8"/>
+<text x="675" y="102" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">Mailer</text>
+<text x="675" y="120" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">worker</text>
+<line x1="840" y1="130" x2="840" y2="1115" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 5"/>
+<rect x="775" y="80" width="130" height="50" rx="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.8"/>
+<text x="840" y="102" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">LLM</text>
+<text x="840" y="120" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">provider</text>
+<line x1="995" y1="130" x2="995" y2="1115" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 5"/>
+<rect x="930" y="80" width="130" height="50" rx="8" fill="#ffffff" stroke="#15803d" stroke-width="1.8"/>
+<text x="995" y="102" font-size="14" font-weight="bold" fill="#1f2937" text-anchor="middle">SMTP</text>
+<text x="995" y="120" font-size="13" font-weight="normal" fill="#6b7280" text-anchor="middle">server</text>
+<line x1="20" y1="170" x2="1080" y2="170" stroke="#2563eb" stroke-width="1.2" stroke-dasharray="2 4"/>
+<rect x="418.0" y="157" width="264.0" height="26" rx="13" fill="#ffffff" stroke="#2563eb" stroke-width="1.2"/>
+<text x="550" y="175" font-size="13" font-weight="bold" fill="#2563eb" text-anchor="middle">SYNCHRONOUS: HTTP request path</text>
+<polyline points="105,215 285,215" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<rect x="111" y="194" width="367" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="115" y="207" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">1. POST /integrations/leadboost/outreach-requests</text>
+<rect x="111" y="220" width="272" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="115" y="232" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">X-API-Key, strict body, idempotency_key</text>
+<rect x="291" y="250" width="738" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="295" y="262" font-size="12.5" font-weight="normal" fill="#2563eb" text-anchor="start">2. API: key resolves the organization; body validated; exactly one ACTIVE mailbox (none or several: 409)</text>
+<polyline points="285,325 480,325" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<rect x="291" y="304" width="221" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="295" y="317" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">3. INSERT external_dispatches</text>
+<rect x="291" y="330" width="286" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="295" y="342" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">QUEUED, message_id NULL, UNIQUE(org, key)</text>
+<rect x="492" y="353" width="72" height="22" rx="11" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.2"/><text x="528.0" y="368" font-size="12" font-weight="bold" fill="#0f766e" text-anchor="middle">QUEUED</text>
+<polyline points="285,405 105,405" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<rect x="111" y="384" width="207" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="115" y="397" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">4. 202 accepted + reference</text>
+<rect x="117" y="413" width="82" height="22" rx="11" fill="#eff6ff" stroke="#2563eb" stroke-width="1.2"/><text x="158.0" y="428" font-size="12" font-weight="bold" fill="#2563eb" text-anchor="middle">ACCEPTED</text>
+<rect x="201" y="417" width="212" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="205" y="429" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">durable, not generated or sent</text>
+<line x1="20" y1="470" x2="1080" y2="470" stroke="#0f766e" stroke-width="1.2" stroke-dasharray="2 4"/>
+<rect x="323.0" y="457" width="454.0" height="26" rx="13" fill="#ffffff" stroke="#0f766e" stroke-width="1.2"/>
+<text x="550" y="475" font-size="13" font-weight="bold" fill="#0f766e" text-anchor="middle">ASYNCHRONOUS: worker process (no HTTP request involved)</text>
+<polyline points="675,515 480,515" fill="none" stroke="#0f766e" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-teal)"/>
+<rect x="486" y="494" width="381" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="507" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">5. G1: claim QUEUED (message_id NULL) -&gt; GENERATING</text>
+<rect x="486" y="520" width="406" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="532" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">SKIP LOCKED, claimed_at is the fence; commit, close session</text>
+<rect x="492" y="543" width="100" height="22" rx="11" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.2"/><text x="542.0" y="558" font-size="12" font-weight="bold" fill="#0f766e" text-anchor="middle">GENERATING</text>
+<polyline points="675,595 840,595" fill="none" stroke="#6b7280" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-grey)"/>
+<rect x="681" y="574" width="199" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="685" y="587" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">6. draft + grounding check</text>
+<rect x="681" y="600" width="185" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="685" y="612" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">no DB session or lock held</text>
+<polyline points="675,660 480,660" fill="none" stroke="#0f766e" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-teal)"/>
+<rect x="486" y="639" width="374" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="652" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">7. G2: insert Message; fenced GENERATING -&gt; QUEUED</text>
+<rect x="486" y="665" width="366" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="677" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">or fenced -&gt; FAILED (LLM error, grounding hard block)</text>
+<polyline points="675,725 480,725" fill="none" stroke="#0f766e" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-teal)"/>
+<rect x="486" y="704" width="418" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="717" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">8. B: claim QUEUED -&gt; SENDING; gates; persist Message-ID</text>
+<rect x="486" y="730" width="467" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="742" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">tenant, ACTIVE mailbox, suppression, grounding, LIVE_SENDING_ENABLED</text>
+<rect x="492" y="753" width="92" height="22" rx="11" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.2"/><text x="538.0" y="768" font-size="12" font-weight="bold" fill="#0f766e" text-anchor="middle">SENDING</text>
+<rect x="588" y="757" width="413" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="592" y="769" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">COMMIT, session closed; gate failure ends as FAILED, no SMTP</text>
+<polyline points="675,822 995,822" fill="none" stroke="#15803d" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-green)"/>
+<rect x="681" y="801" width="403" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="685" y="814" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">9. STARTTLS, login, sendmail (Message-ID as persisted)</text>
+<rect x="681" y="827" width="292" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="685" y="839" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">no DB session, transaction or lock is open</text>
+<rect x="929" y="850" width="132" height="22" rx="11" fill="#f0fdf4" stroke="#15803d" stroke-width="1.2"/><text x="995.0" y="865" font-size="12" font-weight="bold" fill="#15803d" text-anchor="middle">SMTP ATTEMPTED</text>
+<polyline points="995,895 675,895" fill="none" stroke="#15803d" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round" marker-end="url(#a-green)"/>
+<rect x="681" y="874" width="258" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="685" y="887" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">10. accepted | refused | ambiguous</text>
+<rect x="933" y="905" width="124" height="22" rx="11" fill="#f0fdf4" stroke="#15803d" stroke-width="1.2"/><text x="995.0" y="920" font-size="12" font-weight="bold" fill="#15803d" text-anchor="middle">SMTP ACCEPTED</text>
+<polyline points="675,965 480,965" fill="none" stroke="#0f766e" stroke-width="2" stroke-linejoin="round" marker-end="url(#a-teal)"/>
+<rect x="486" y="944" width="359" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="957" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">11. C: fenced SENDING -&gt; SENT | FAILED | UNKNOWN</text>
+<rect x="486" y="970" width="386" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="490" y="982" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">id, org, state, claimed_by and claimed_at must all match</text>
+<rect x="20" y="560" width="232" height="118" rx="6" fill="#fffbeb" stroke="#b45309" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="30" y="582" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">Generation crash or lease</text>
+<text x="30" y="600" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">expiry (300 s): sweep returns</text>
+<text x="30" y="618" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">the row to QUEUED. Safe:</text>
+<text x="30" y="636" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">no external side effect.</text>
+<rect x="20" y="705" width="232" height="150" rx="6" fill="#fffbeb" stroke="#b45309" stroke-width="1.6"/>
+<text x="30" y="727" font-size="13" font-weight="bold" fill="#b45309" text-anchor="start">UNKNOWN (never resent)</text>
+<text x="30" y="748" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">Ambiguous send, send_email</text>
+<text x="30" y="766" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">raising, SENDING lease expiry</text>
+<text x="30" y="784" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">(900 s), shutdown drain</text>
+<text x="30" y="802" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">deadline, or C failing: state is</text>
+<text x="30" y="820" font-size="12.5" font-weight="normal" fill="#1f2937" text-anchor="start">UNKNOWN. Nothing re-queues it.</text>
+<line x1="20" y1="1010" x2="1080" y2="1010" stroke="#2563eb" stroke-width="1.2" stroke-dasharray="2 4"/>
+<rect x="353.4" y="997" width="393.2" height="26" rx="13" fill="#ffffff" stroke="#2563eb" stroke-width="1.2"/>
+<text x="550" y="1015" font-size="13" font-weight="bold" fill="#2563eb" text-anchor="middle">READ PATH: LeadBoost observes state (read-only)</text>
+<polyline points="105,1048 285,1048" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<rect x="111" y="1027" width="352" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="115" y="1040" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">12. GET .../outreach-actions/{key}/conversation</text>
+<polyline points="285,1100 105,1100" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round" marker-end="url(#a-blue)"/>
+<rect x="111" y="1079" width="287" height="19" fill="#ffffff" fill-opacity="0.92"/>
+<text x="115" y="1092" font-size="13" font-weight="normal" fill="#1f2937" text-anchor="start">13. 200 action state + recent messages</text>
+<rect x="111" y="1105" width="447" height="18" fill="#ffffff" fill-opacity="0.92"/>
+<text x="115" y="1117" font-size="12" font-weight="normal" fill="#6b7280" text-anchor="start">one snapshot; state is queued | sending | sent | failed | unknown</text>
+<text x="20" y="1160" font-size="11.5" font-weight="normal" fill="#6b7280" text-anchor="start" font-style="italic">Recipient receipt is not observable here: SENT means the SMTP server accepted the message. Source: external_dispatch_worker.py, outreach_generation_worker.py, work_claiming.py.</text>
+</svg>
