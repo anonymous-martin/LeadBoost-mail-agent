@@ -34,7 +34,7 @@ Trust boundaries:
 | Component | Entry point | Notes |
 |---|---|---|
 | API | `mailer_agent/api/main.py` (`python run.py` locally; Gunicorn with Uvicorn workers on Render) | Routers: integrations, generated outreach, conversation, mailboxes, webhooks, system. `/health` is liveness only. |
-| Worker | `worker.py` | Installs signal handlers, calls `init_db()`, starts one APScheduler, drains on shutdown. No HTTP endpoint. |
+| Worker | `worker.py` | Calls `prepare_schema()` (create-missing-tables under a lock, or a read-only check in `verify` mode), installs signal handlers, starts one APScheduler, drains on shutdown. No HTTP endpoint. |
 | Scheduler | `mailer_agent/followup/scheduler.py` | Nine jobs, each `max_instances=1`: legacy reply poll, per-mailbox inbox poll, native new-contact and follow-up dispatch, external-dispatch send, generation, two lease-recovery sweeps, a health-check log job. |
 | Dispatch worker | `mailer_agent/mail/external_dispatch_worker.py` | Send claim, gates, SMTP, outcome. |
 | Generation worker | `mailer_agent/mail/outreach_generation_worker.py` | Generation claim, LLM draft, grounding, `Message` creation. |
@@ -128,7 +128,7 @@ Two organizations can register the same address. Mailer does not deduplicate phy
 | Ambiguous SMTP outcome | `UNKNOWN` | Operator checks the stored `Message-ID` externally |
 | Worker crash during `SENDING` | Lease expires | Sweep sets `UNKNOWN`, never `QUEUED` |
 | SIGTERM | Worker drains up to `EXTERNAL_DISPATCH_SHUTDOWN_DRAIN_SECONDS` (25 s); unfinished sends become `UNKNOWN`, unclaimed work stays `QUEUED` | None needed |
-| Two processes run `init_db()` on an empty database | Observed once on hosted infrastructure: a duplicate-sequence error; a later start recovered (`HOSTED OBSERVED`) | Race not yet fixed; run the migration wrapper once before starting both services (`DEFERRED`) |
+| Two processes run `init_db()` on an empty database | Observed once on hosted infrastructure: a duplicate-sequence error; a later start recovered (`HOSTED OBSERVED`) | `init_db()` is serialized by a PostgreSQL advisory lock; `SCHEMA_INIT_MODE=verify` runs no DDL. Reproduced and fixed on disposable PostgreSQL (`LOCAL VERIFIED`); not re-observed on hosted infrastructure |
 
 ### Delivery guarantees and their limits
 

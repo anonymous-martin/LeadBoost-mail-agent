@@ -31,7 +31,7 @@ document is an instruction for future deployments.
 | Worker running on Railway: APScheduler started and scheduled dispatch/generation jobs executed (worker logs); observed database use at runtime, not evidence of a dispatch being sent | Performed, `HOSTED OBSERVED` |
 | Railway project is on a Limited Trial; outbound SMTP from the worker may be restricted on that plan and the permitted networking and sending path has not been verified | Current deployment caveat; SMTP connectivity from the Railway worker is `NOT VERIFIED` |
 | Python 3.12 runtime pin: CI succeeded on the canonical-mirror target repository (run `38626064792`, commit `ce0cbfa`) | `CI VERIFIED` |
-| First `init_db()` startup of two processes against the database | A duplicate-sequence error was observed once; a later startup recovered. The race is **not fixed** (`DEFERRED`) |
+| First `init_db()` startup of two processes against the database | A duplicate-sequence error was observed once; a later startup recovered. Since then the race has been reproduced and fixed in code (advisory lock; `SCHEMA_INIT_MODE=verify`), `LOCAL VERIFIED` on disposable PostgreSQL and not re-observed on hosted infrastructure |
 | Worker deployed through the Render Blueprint | Not performed (the worker runs on Railway) |
 | Removal of the redundant Railway `web` service | Unconfirmed |
 | Controlled acceptance: deployed request, dispatch lifecycle and receipt of one message | **Not performed.** Hosted end-to-end delivery is `NOT VERIFIED` |
@@ -127,8 +127,8 @@ Steps are in order. Do not start a step before the previous one is confirmed.
    tenant key. With no valid key source the API **refuses to start** (section 3). Keep
    offline copies of the keys and of the encryption key.
 5. **Build/deploy the services from the reviewed Blueprint** (Render: New -> Blueprint, point
-   at this repository at the reviewed commit). Both services start; each runs `init_db()`
-   (create missing tables only). This is **not** a migration: `init_db()` does not apply
+   at this repository at the reviewed commit). Both services start; each runs `prepare_schema()`
+   (by default `init_db()`: create missing tables only, serialized by a database lock). This is **not** a migration: `init_db()` does not apply
    the canonical constraints/indexes (section 5), so a started service does not mean a
    migrated database. Live sending and auto-reply stay `false`.
 6. **Before applying anything, establish recovery evidence and run the read-only modes**
@@ -481,7 +481,7 @@ Labels: `CI VERIFIED`, `LOCAL E2E VERIFIED`, `HOSTED OBSERVED`, `IMPLEMENTED, NO
 | Dedicated Supabase project reachable over its session pooler; canonical 11-step wrapper run completed with expected markers on `--status` | `HOSTED OBSERVED` (operator-reported terminal observation; pooler reached from a WSL shell, not from Render) |
 | Render API `GET /health` 200; `GET /metrics` 404 (no such route exists) | `HOSTED OBSERVED` |
 | Worker running on Railway: APScheduler started; dispatch and generation jobs executed | `HOSTED OBSERVED` (worker logs) |
-| A concurrent first `init_db()` start produced a duplicate-sequence error once; a later start recovered | `HOSTED OBSERVED`; unresolved and `DEFERRED` until a code change and regression test demonstrate a fix |
+| A concurrent first `init_db()` start produced a duplicate-sequence error once; a later start recovered | `HOSTED OBSERVED`; fixed in code with a regression test (`LOCAL VERIFIED`); hosted re-observation pending |
 | Outbound SMTP from the Railway worker (Limited Trial caveat) | `NOT VERIFIED` |
 | Backups/recovery of the Supabase project, Render-to-Supabase connection type, deployed HTTPS behavior of fail-closed auth, `/docs` exposure, worker liveness signal, live key agreement between LeadBoost and Mailer, removal of the redundant Railway `web` service | `NOT VERIFIED` (dashboard-only facts; no evidence recorded) |
 | A deployed request through to a received message (hosted end-to-end delivery) | `NOT VERIFIED` (controlled acceptance not performed) |

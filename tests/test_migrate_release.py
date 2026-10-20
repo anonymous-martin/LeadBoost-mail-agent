@@ -288,3 +288,57 @@ def test_migration_007_precheck_does_not_block_when_only_terminal_dispatches_exi
     assert p.returncode == 0, _out(p)
     assert "mailboxes" in disposable_db.tables()
     assert _dispatch_state(disposable_db, dispatch_id) == "sent", "existing delivery state must be preserved"
+
+
+# --------------------------------------------------------------------------
+# `migrate_preflight.py verify`: read-only dry run of the SCHEMA_INIT_MODE=verify start-up check
+# --------------------------------------------------------------------------
+PREFLIGHT = ROOT / "scripts" / "migrate_preflight.py"
+
+
+def _preflight(*args: str, **env) -> subprocess.CompletedProcess:
+    full = {k: v for k, v in os.environ.items() if k not in _SCRUBBED}
+    full.update(env)
+    return subprocess.run(
+        [sys.executable, str(PREFLIGHT), *args], cwd=ROOT, env=full, check=False, capture_output=True, text=True, timeout=300
+    )
+
+
+def test_verify_subcommand_is_guarded_like_every_other_subcommand(no_sqlite_side_effect):
+    p = _preflight("verify")  # no DATABASE_URL at all
+    assert p.returncode == 2 and "REFUSED" in _out(p)
+    p = _preflight("verify", DATABASE_URL="sqlite:///./x.db")
+    assert p.returncode == 2 and "REFUSED" in _out(p)
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+def test_verify_reports_an_empty_database_as_not_ready_and_creates_nothing(disposable_db):
+    p = _preflight("verify", DATABASE_URL=disposable_db.dsn, MIGRATE_DISPOSABLE_TEST_DB="yes")
+    assert p.returncode == 5, _out(p)
+    assert "[MISSING] missing table external_dispatches" in _out(p)
+    assert "would refuse to start" in _out(p)
+    assert disposable_db.tables() == set(), "verify must never create anything"
+    assert "password" not in _out(p).lower() and disposable_db.dsn not in _out(p)
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+def test_verify_passes_after_the_real_canonical_migration_sequence(disposable_db):
+    assert disposable_db.run().returncode == 0
+    before = disposable_db.tables()
+    p = _preflight("verify", DATABASE_URL=disposable_db.dsn, MIGRATE_DISPOSABLE_TEST_DB="yes")
+    assert p.returncode == 0, _out(p)
+    assert "would start" in _out(p) and "[MISSING]" not in _out(p)
+    assert disposable_db.tables() == before
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+def test_verify_names_the_columns_a_legacy_shaped_database_lacks(disposable_db):
+    _legacy_shaped_db_with_dispatch(disposable_db, "sent")
+    p = _preflight("verify", DATABASE_URL=disposable_db.dsn, MIGRATE_DISPOSABLE_TEST_DB="yes")
+    assert p.returncode == 5, _out(p)
+    assert "missing column external_dispatches.mailbox_id" in _out(p)
+    assert "missing column messages.mailbox_id" in _out(p)
+    assert "missing table mailboxes" in _out(p)

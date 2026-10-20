@@ -18,7 +18,7 @@ from mailer_agent.api import (
 )
 from mailer_agent.api.deps import validate_auth_configuration
 from mailer_agent.config import get_settings
-from mailer_agent.db import init_db
+from mailer_agent.db import prepare_schema
 from mailer_agent.followup.scheduler import start_scheduler, stop_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     # C15.1: fail closed. Missing/invalid authentication configuration stops the API from
     # starting at all (before any database work) instead of serving unauthenticated routes.
     validate_auth_configuration()
-    init_db()
+    prepare_schema()
     logger.info(
         "Mailer Agent starting | live_sending_enabled=%s auto_reply_enabled=%s run_scheduler_in_process=%s",
         settings.live_sending_enabled, settings.auto_reply_enabled, settings.run_scheduler_in_process,

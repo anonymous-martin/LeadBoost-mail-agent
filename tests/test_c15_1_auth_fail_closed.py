@@ -292,7 +292,7 @@ def test_startup_accepts_a_valid_configuration(keys):
 
 def test_lifespan_refuses_to_start_before_touching_the_database(no_keys, monkeypatch):
     called = []
-    monkeypatch.setattr(api_main, "init_db", lambda: called.append("init_db"))
+    monkeypatch.setattr(api_main, "prepare_schema", lambda: called.append("prepare_schema"))
     monkeypatch.setattr(get_settings(), "run_scheduler_in_process", False)
     with pytest.raises(deps.AuthConfigurationError), TestClient(app):
         pass
@@ -301,11 +301,11 @@ def test_lifespan_refuses_to_start_before_touching_the_database(no_keys, monkeyp
 
 def test_lifespan_starts_with_valid_keys(keys, monkeypatch):
     called = []
-    monkeypatch.setattr(api_main, "init_db", lambda: called.append("init_db"))
+    monkeypatch.setattr(api_main, "prepare_schema", lambda: called.append("prepare_schema"))
     monkeypatch.setattr(get_settings(), "run_scheduler_in_process", False)
     with TestClient(app) as c:
         assert c.get("/health").status_code == 200
-    assert called == ["init_db"]
+    assert called == ["prepare_schema"]
 
 
 # --------------------------------------------------------------------------- spec 15: dev opt-out

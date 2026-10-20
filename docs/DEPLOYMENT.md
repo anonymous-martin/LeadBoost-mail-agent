@@ -50,7 +50,7 @@ A code deployment and a database migration are **separate release actions**. The
    MIGRATE_CONFIRM_BACKUP=I_HAVE_A_VERIFIED_BACKUP_OF_<database name> scripts/migrate_release.sh
    ```
    Apply new migrations **before** deploying code that depends on them: the ORM selects new columns on every query.
-4. **Deploy** the API and worker. Start order matters once: `init_db()` runs at start in both processes, and two processes starting together against an empty database raced once (`HOSTED OBSERVED`; a later start recovered; hardening `DEFERRED`). Running the migration wrapper first is a mitigation, not a verified fix.
+4. **Deploy** the API and worker. Two processes starting together against an empty database raced once (`HOSTED OBSERVED`; a later start recovered). `init_db()` is now serialized by a PostgreSQL advisory lock, and a service may run with `SCHEMA_INIT_MODE=verify` (read-only, no DDL). The race was reproduced on disposable PostgreSQL before the fix and a regression test now covers it (`LOCAL REPRODUCED` / `LOCAL VERIFIED`); it has **not** been re-observed on hosted infrastructure. Run the migration wrapper before the first start of a new database regardless: it remains the source of truth for the schema, because `init_db()` creates tables only. To make a deployed service run no DDL at all, set `SCHEMA_INIT_MODE=verify` on it (see the staged procedure below).
 5. **Verify health**: `GET /health` answers 200 (liveness only); an authenticated `GET /system/health` proves database access; worker logs show the scheduler starting and the dispatch and generation jobs running. There is no worker HTTP endpoint and no `/metrics`.
 6. **Controlled acceptance** (not yet performed): with `LIVE_SENDING_ENABLED=true` on the worker only, send one request to a disposable recipient you control, through the deployed API, and record the request, the dispatch states, the worker log lines and the receipt. Until then hosted end-to-end delivery is `NOT VERIFIED`.
 
@@ -119,10 +119,19 @@ The authoritative table. Scope: **API** = API service only, **Worker** = worker 
 
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `IMAP_HOST`, `IMAP_PORT`, `IMAP_USERNAME`, `IMAP_PASSWORD`, `FOLLOWUP_POLL_SECONDS`, `DEFAULT_FOLLOWUP_DAYS`, `MAX_SENDS_PER_CYCLE`, `SEND_DELAY_SECONDS`, `SEND_JITTER_SECONDS`. Integration dispatches do not use the global SMTP identity; they send through the organization's mailbox. See `.env.example` for placeholders.
 
+### Switching a service to `SCHEMA_INIT_MODE=verify` (optional, staged, reversible)
+
+1. Deploy the release that contains this change first. The default (`create`) behaves as before, now with the lock.
+2. Against the REAL database, read-only, from a trusted workstation: `DATABASE_URL=... python scripts/migrate_preflight.py verify`. It prints only `host:port/database` and the names of any missing tables/columns, and exits 5 if anything is missing. Also run `scripts/migrate_release.sh --status`.
+3. Only if both are clean, set `SCHEMA_INIT_MODE=verify` on ONE service (API first), redeploy it, and confirm `/health` and a read-only tenant call. Then the worker, and any other API instance (including the Railway `web` service, if it still exists). `render.yaml` is intentionally unchanged: nothing is flipped by merging.
+4. Rollback is unsetting the variable (or setting it to `create`) and redeploying; no data or schema is touched either way.
+
+A service in `verify` mode refuses to start if a table or column is missing, with a message naming it. `verify` is structural only; it does not prove migrations were applied (use `--status`).
+
 ## 8. Known deployment gaps
 
 - `render.yaml` has no pre-deploy migration step; migrations are manual (by design).
-- The `init_db()` start race is observed but not yet fixed.
+- The `init_db()` start race: fixed in code and verified on disposable PostgreSQL (`LOCAL VERIFIED`); not re-observed on hosted infrastructure. Deployed services still run `SCHEMA_INIT_MODE=create` (the default) until an operator switches them to `verify`.
 - The redundant Railway `web` service is pending confirmation and cleanup.
 - Hosted end-to-end delivery has not been demonstrated: the deployed LeadBoost-to-Mailer message delivery is `NOT VERIFIED` unless new dispatch and receipt evidence is recorded.
 - Outbound SMTP from the Railway worker is unverified (Limited Trial caveat above).

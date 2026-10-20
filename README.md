@@ -143,7 +143,7 @@ Known limitations (`KNOWN LIMITATION`):
 - Bounce handling coverage is deferred.
 - There is no Prometheus-style `/metrics` route (the deployed API answers 404 there). Telemetry is under `/system/metrics/*`.
 - The worker has no HTTP health endpoint; observe it through its logs.
-- `init_db()` runs at API and worker start. Two processes starting together against an empty database raced once on hosted infrastructure; the hardening is pending (see the readiness report).
+- At API and worker start `prepare_schema()` runs. In the default `SCHEMA_INIT_MODE=create` it calls `init_db()` (create missing tables only, never alters), now serialized across processes by a PostgreSQL advisory lock; two processes starting together against an empty database raced once on hosted infrastructure and the race is reproduced and fixed locally (see `docs/DEPLOYMENT.md`). A deployed service should run `SCHEMA_INIT_MODE=verify`: no DDL, it only checks that the tables and columns exist, and `scripts/migrate_release.sh` is the only thing that changes the schema.
 
 ## Testing and deployment
 
