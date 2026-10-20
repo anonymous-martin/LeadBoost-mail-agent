@@ -10,10 +10,24 @@ Multi-tenancy model (simple, no OAuth):
 - When a key resolves to an org, the org_id is injected into the request via
   get_current_org_id(); every data-access query must filter by it.
 
-Key-to-org resolution order (highest priority wins when the same key string repeats):
+Sources (merged into one {key: org_id} map):
   1. ORG_KEY_MAP env var (JSON object: {"<key>": "<org_id>", ...})  <- preferred for prod
   2. Individual ORG_KEYS_<n> env vars: ORG_KEYS_acme=api_key_xxx
   3. Legacy API_KEY -> org_id "default"
+
+CREDENTIAL COLLISIONS ARE REJECTED, NEVER RESOLVED BY PRECEDENCE
+----------------------------------------------------------------
+A credential identifies exactly one tenant. If the same key string (compared after trimming
+surrounding whitespace) is configured for two DIFFERENT organizations -- within one source or
+across sources, including the legacy API_KEY (org "default") -- the whole authentication
+configuration is rejected exactly like a malformed ORG_KEY_MAP: the key map is left empty, the
+API refuses to start, and every protected route would answer 503. Earlier versions silently let
+ORG_KEY_MAP win over ORG_KEYS_* over API_KEY, which could quietly re-assign a credential to a
+different tenant. Likewise a repeated literal key in the ORG_KEY_MAP JSON object (which
+``json.loads`` would silently collapse to its last value) is rejected.
+Still valid, and unchanged: several DISTINCT keys for one organization (key rollover), and the
+same key configured more than once for the SAME organization. Error texts name only the
+conflicting sources -- never a key, an organization id or an environment-variable name.
 
 FAIL CLOSED (C15.1)
 -------------------
@@ -102,11 +116,26 @@ class AuthConfig:
     explicit_keys_active: bool = False  # ORG_KEY_MAP and/or ORG_KEYS_* contributed at least one key
 
 
+class _DuplicateJsonMember(ValueError):
+    """A JSON object repeated a literal member name (json.loads would silently keep the last)."""
+
+
+def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    seen: set[str] = set()
+    for member, _value in pairs:
+        if member in seen:
+            raise _DuplicateJsonMember()
+        seen.add(member)
+    return dict(pairs)
+
+
 def _parse_org_key_map(raw: str) -> tuple[dict[str, str], str | None]:
     """Strictly parse ORG_KEY_MAP. Returns (mapping, error). On any problem returns ({}, error);
     the error describes the shape problem only and never echoes content."""
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_members)
+    except _DuplicateJsonMember:
+        return {}, "ORG_KEY_MAP repeats the same key more than once (a JSON object may not contain duplicate keys)"
     except (json.JSONDecodeError, RecursionError):
         return {}, "ORG_KEY_MAP is set but is not valid JSON"
     if not isinstance(parsed, dict):
@@ -122,41 +151,78 @@ def _parse_org_key_map(raw: str) -> tuple[dict[str, str], str | None]:
     return mapping, None
 
 
+def _credential_conflict(entries: list[tuple[str, str, str]]) -> str | None:
+    """Validate the FINAL effective credential set. ``entries`` is (source label, key, org_id) for
+    every configured credential from every active source. Returns a value-free error if one
+    credential (compared after .strip(), as an HTTP header value is whitespace-trimmed in transit)
+    belongs to more than one organization, else None. Several keys for one organization, and one
+    key repeated for the same organization, are fine."""
+    owner: dict[str, tuple[str, str]] = {}  # normalized key -> (org_id, source)
+    for source, key, org_id in entries:
+        normalized = key.strip()
+        if normalized not in owner:
+            owner[normalized] = (org_id, source)
+            continue
+        first_org, first_source = owner[normalized]
+        if first_org != org_id:
+            where = (
+                f"within {source}"
+                if first_source == source
+                else f"between {', '.join(sorted({first_source, source}))}"
+            )
+            return (
+                f"One API key is configured for more than one organization ({where}); "
+                "a credential must identify exactly one tenant"
+            )
+    return None
+
+
 def load_auth_config(environ: dict[str, str] | None = None, legacy_api_key: str | None = None) -> AuthConfig:
     """
     Build the effective {api_key: org_id} map from configuration.
 
-    Three sources, merged in priority order (highest first):
+    Three sources are merged:
       1. ORG_KEY_MAP - JSON object in one env var, easiest for secrets managers.
       2. ORG_KEYS_<org_id>=<key> - individual per-org vars, easier in .env files.
       3. Legacy API_KEY - single key -> org "default".
 
-    A malformed ORG_KEY_MAP yields an EMPTY map plus an error: the configuration is rejected as a
-    whole rather than partly honoured.
+    A malformed ORG_KEY_MAP, a repeated literal ORG_KEY_MAP key, or any credential that maps to two
+    different organizations (within or across the sources, legacy key included) yields an EMPTY map
+    plus an error: the configuration is rejected as a whole rather than partly honoured, and no
+    precedence rule can quietly re-assign a key to another tenant.
     """
     env = os.environ if environ is None else environ
     legacy = settings.api_key if legacy_api_key is None else legacy_api_key
     mapping: dict[str, str] = {}
+    entries: list[tuple[str, str, str]] = []
 
-    # 3. Legacy single key (lowest priority, may be overridden)
+    # 3. Legacy single key
     if legacy:
         mapping[legacy] = "default"
+        entries.append(("API_KEY (legacy)", legacy, "default"))
 
     # 2. ORG_KEYS_<org_id>=<key> - scan environment
     explicit = False
     for env_key, env_val in env.items():
         if env_key.upper().startswith("ORG_KEYS_") and env_val.strip():
-            mapping[env_val.strip()] = env_key[len("ORG_KEYS_"):].lower()
+            org_id = env_key[len("ORG_KEYS_"):].lower()
+            mapping[env_val.strip()] = org_id
+            entries.append(("ORG_KEYS_*", env_val.strip(), org_id))
             explicit = True
 
-    # 1. ORG_KEY_MAP JSON (highest priority, overwrites anything above)
+    # 1. ORG_KEY_MAP JSON
     raw = env.get("ORG_KEY_MAP", "").strip()
     if raw:
         parsed, error = _parse_org_key_map(raw)
         if error:
             return AuthConfig(key_map={}, error=error)
         mapping.update(parsed)
+        entries.extend(("ORG_KEY_MAP", key, org_id) for key, org_id in parsed.items())
         explicit = explicit or bool(parsed)
+
+    conflict = _credential_conflict(entries)
+    if conflict:
+        return AuthConfig(key_map={}, error=conflict)
 
     return AuthConfig(
         key_map=mapping,

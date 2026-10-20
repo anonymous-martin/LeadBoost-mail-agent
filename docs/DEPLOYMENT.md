@@ -74,8 +74,8 @@ The authoritative table. Scope: **API** = API service only, **Worker** = worker 
 | Variable | Scope | Required service | Safe default | Notes |
 |---|---|---|---|---|
 | `DATABASE_URL` | Both | PostgreSQL | local SQLite file | Production uses a dedicated Mailer PostgreSQL. Never commit or paste it. |
-| `ORG_KEY_MAP` | API | none | none: API refuses to start without a key source | `{"<mailer_tenant_key>":"<mailer_org_id>"}`. Distinct from the operator and encryption keys. |
-| `ORG_KEYS_<org>` | API | none | unset | Optional additional key source, merged below `ORG_KEY_MAP`. |
+| `ORG_KEY_MAP` | API | none | none: API refuses to start without a key source | `{"<mailer_tenant_key>":"<mailer_org_id>"}`. Distinct from the operator and encryption keys. A key may appear only once, and for one organization; several keys for one organization are allowed (rollover). |
+| `ORG_KEYS_<org>` | API | none | unset | Optional additional key source, merged with `ORG_KEY_MAP` (no precedence: a key configured for two different organizations is rejected at startup). |
 | `API_KEY` | API, Legacy | none | unset | Single legacy key mapping to organization `default`. Do not add it in production dashboards. |
 | `SYSTEM_OPERATOR_API_KEY` | API | none | empty: operator routes answer 503 | Must differ from every tenant key. |
 | `MAILBOX_ENCRYPTION_KEY` | Both | none | empty: credential operations answer 503; sends stay queued | Fernet key. Same value on both services. Preserve it. |

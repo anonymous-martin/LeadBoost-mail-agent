@@ -233,9 +233,12 @@ def test_legacy_key_is_merged_alongside_org_key_map_and_never_overrides_it():
     cfg = deps.load_auth_config(env, legacy_api_key=LEGACY)
     assert cfg.key_map == {LEGACY: "default", KEY_B: "acme", KEY_A: ORG_A}
     assert cfg.legacy_key_active and cfg.explicit_keys_active
-    # the same key string configured both ways: the explicit tenant mapping wins, as before
+    # The same key string configured as the legacy key (org "default") AND for another tenant used
+    # to be silently re-assigned to that tenant ("the explicit mapping wins"). PR 2: a credential
+    # must identify exactly one tenant, so this is now a rejected configuration (see
+    # tests/test_pr2_key_map_collisions.py for the full matrix).
     clash = deps.load_auth_config({"ORG_KEY_MAP": f'{{"{LEGACY}": "{ORG_A}"}}'}, legacy_api_key=LEGACY)
-    assert clash.key_map == {LEGACY: ORG_A}
+    assert clash.error and clash.key_map == {} and LEGACY not in clash.error
 
 
 def test_legacy_key_is_valid_on_integration_and_mailbox_routes_as_org_default(sm, monkeypatch):
