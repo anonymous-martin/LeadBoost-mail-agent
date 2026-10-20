@@ -115,15 +115,17 @@ def test_resolver_still_maps_valid_keys_to_their_organization(keys):
     assert deps._resolve_org("") is None
 
 
-def test_resolver_precedence_for_a_repeated_key_is_unchanged(monkeypatch):
-    """One dict entry per key string (load_auth_config's precedence), so a repeated key resolves to the
-    org the merged map holds -- the comparison change must not alter that."""
+def test_resolver_for_a_key_repeated_for_the_same_organization_is_unchanged(monkeypatch):
+    """One dict entry per key string. Repeating a key for the SAME organization across sources is
+    harmless and still resolves to it. (Repeating it for DIFFERENT organizations used to be settled
+    silently by precedence; PR 2 rejects that configuration -- see test_pr2_key_map_collisions.py.)"""
     cfg = deps.load_auth_config(
-        environ={"ORG_KEY_MAP": '{"shared-key-xxxxxxxx": "from-map"}', "ORG_KEYS_other": "shared-key-xxxxxxxx"},
+        environ={"ORG_KEY_MAP": '{"shared-key-xxxxxxxx": "default"}', "ORG_KEYS_default": "shared-key-xxxxxxxx"},
         legacy_api_key="shared-key-xxxxxxxx",
     )
+    assert cfg.error is None
     monkeypatch.setattr(deps, "_KEY_MAP", cfg.key_map)
-    assert deps._resolve_org("shared-key-xxxxxxxx") == "from-map"
+    assert deps._resolve_org("shared-key-xxxxxxxx") == "default"
 
 
 # --------------------------------------------------------------------------- HTTP, real dependencies

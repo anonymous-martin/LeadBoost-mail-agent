@@ -81,7 +81,7 @@ Files under `tests/evaluation/test_live_*.py` and `tests/test_semantic_regressio
 | Dispatch state machine, claims, recovery | `test_external_dispatch_claiming.py`, `test_dispatch_recovery_semantics.py`, `test_external_dispatch_crash_matrix.py`, `test_external_dispatch_worker.py`, `test_external_dispatch_postgres.py` |
 | Worker shutdown | `test_external_dispatch_scheduler_shutdown.py` |
 | Idempotency | `test_leadboost_integration.py`, `test_leadboost_generated_outreach.py`, `test_leadboost_generated_outreach_postgres.py` |
-| Tenant boundaries | `test_leadboost_native_isolation.py`, `test_c15_1_auth_fail_closed.py`, `test_c15_1b_webhook_tenant_scope.py`, `test_tenant_correlation.py`, `test_pr3_system_operator_boundary.py` |
+| Tenant boundaries | `test_leadboost_native_isolation.py`, `test_c15_1_auth_fail_closed.py`, `test_pr2_key_map_collisions.py`, `test_c15_1b_webhook_tenant_scope.py`, `test_tenant_correlation.py`, `test_pr3_system_operator_boundary.py` |
 | Mailbox API and encryption (deterministic, run by CI) | `test_mailbox_foundation.py`, `test_l1_mailbox_transport_update.py` |
 | Mailbox persistence and encryption on PostgreSQL (**not run by any CI job**) | `test_mailbox_postgres.py` |
 | SMTP outcomes | `test_smtp_local_integration.py`, `test_smtp_explicit_refusals_not_retried.py`, `test_sender_message_id.py`, `test_sender_quit_containment.py`, `test_sender_cleanup_precedence.py` |

@@ -135,3 +135,25 @@ def test_operator_key_on_the_worker_warns_and_is_never_echoed(tmp_path):
     rc, out = run("worker", tmp=tmp_path, drop=("ORG_KEY_MAP",), SYSTEM_OPERATOR_API_KEY=OPKEY)
     assert rc == 0, out
     assert "SYSTEM_OPERATOR_API_KEY" in out and "WARN" in out and OPKEY not in out
+
+
+# --- PR 2: credential collisions are reported as a preflight failure, without echoing any value ----
+def test_legacy_api_key_equal_to_a_tenant_key_fails_the_preflight(tmp_path):
+    rc, out = run(tmp=tmp_path, API_KEY=KEY)  # KEY is also mapped to org1 in ORG_KEY_MAP
+    assert rc == 1, out
+    assert "more than one organization" in out and "REFUSES TO START" in out
+    assert "API_KEY (legacy)" in out and "ORG_KEY_MAP" in out  # sources named, never values
+    assert "Traceback" not in out
+
+
+def test_duplicate_json_keys_in_org_key_map_fail_the_preflight(tmp_path):
+    rc, out = run(tmp=tmp_path, ORG_KEY_MAP=f'{{"{KEY}": "org1", "{KEY}": "org2"}}')
+    assert rc == 1, out
+    assert "more than once" in out and "REFUSES TO START" in out
+
+
+def test_key_rollover_for_one_tenant_passes_the_preflight(tmp_path):
+    other = "R" * 40
+    rc, out = run(tmp=tmp_path, ORG_KEY_MAP=f'{{"{KEY}": "org1", "{other}": "org1"}}')
+    assert rc == 0, out
+    assert "2 key(s)" in out
