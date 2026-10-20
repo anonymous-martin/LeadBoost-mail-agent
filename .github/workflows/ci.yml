@@ -157,6 +157,16 @@ jobs:
           bash -n scripts/migrate_release.sh
           python -m pytest -o addopts="" tests/test_migrate_release.py -v
 
+      # PR 3: several REAL processes start together against empty / already-migrated disposable
+      # databases (init_db advisory lock; SCHEMA_INIT_MODE=verify). REQUIRE_SCHEMA_INIT_PG=1 makes a
+      # missing PostgreSQL a hard failure, so this step can never "pass" by skipping.
+      - name: Concurrent schema initialization against disposable PostgreSQL
+        env:
+          POSTGRES_TEST_URL: postgresql+psycopg2://mailer_agent:mailer_agent_test_pw@localhost:5432/mailer_agent_test
+          REQUIRE_SCHEMA_INIT_PG: "1"
+        run: |
+          python -m pytest -o addopts="" tests/test_schema_init.py -v
+
   local-smtp:
     name: Local SMTP protocol integration
     runs-on: ubuntu-24.04

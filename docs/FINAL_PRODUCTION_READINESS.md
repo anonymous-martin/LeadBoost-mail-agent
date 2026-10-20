@@ -58,7 +58,7 @@ The classes are never merged. In particular, a passing test is not a hosted obse
 - **Railway Limited Trial caveat.** The Railway project is on a Limited Trial, and outbound SMTP from the worker may be restricted on that plan. The account's permitted networking and sending path has not been verified, so SMTP connectivity from the Railway worker is `NOT VERIFIED` and a current deployment caveat.
 - Supabase was reached over its session pooler from a WSL shell. Reachability from Render was not recorded.
 - The canonical migration wrapper completed its 11-step sequence; the final `--status` reported the expected markers present.
-- An initial concurrent `init_db()` startup produced a duplicate-sequence error; a later startup recovered. Both the API and the worker call `init_db()` at start, and the API runs two Gunicorn workers, so several processes can reach `create_all` together. The race is **not** declared fixed; hardening is `DEFERRED`.
+- An initial concurrent `init_db()` startup produced a duplicate-sequence error; a later startup recovered. Both the API and the worker call `init_db()` at start, and the API runs two Gunicorn workers, so several processes can reach `create_all` together. UPDATE: `init_db()` is now serialized by a PostgreSQL advisory lock, and a service may run with `SCHEMA_INIT_MODE=verify` (read-only, no DDL). The race was reproduced on disposable PostgreSQL before the fix and a regression test now covers it (`LOCAL REPRODUCED` / `LOCAL VERIFIED`); it has **not** been re-observed on hosted infrastructure.
 - A second Railway service named `web` (Gunicorn API process, from the `Procfile`) was seen. Its removal is unconfirmed.
 
 ## 5. Known limitations (`KNOWN LIMITATION`)
@@ -77,7 +77,7 @@ The classes are never merged. In particular, a passing test is not a hosted obse
 ## 6. Remaining acceptance evidence
 
 1. Remove or reconfigure the redundant Railway `web` service, then record the final service list.
-2. Harden `init_db()` against concurrent starts. The observed race stays unresolved (`DEFERRED`) until a code change and a regression test demonstrate a fix; running the migration wrapper before starting both services is a mitigation, not a verified fix.
+2. ~~Harden `init_db()` against concurrent starts.~~ Done in code with a regression test (`tests/test_schema_init.py`, CI step "Concurrent schema initialization against disposable PostgreSQL"). Remaining: confirm on the hosted services (no re-observation yet) and, optionally, switch deployed services to `SCHEMA_INIT_MODE=verify` per `docs/DEPLOYMENT.md`.
 3. Verify the Railway account's permitted outbound networking and SMTP path (Limited Trial caveat), or move the worker to a provider where outbound SMTP is confirmed.
 4. Run the controlled acceptance on the deployed system: one request through the deployed API with `LIVE_SENDING_ENABLED=true` on the worker only, to a disposable recipient the operator controls. Record the request and response, the dispatch states (`queued` through `sent`), the worker log lines and the receipt. Until then deployed LeadBoost-to-Mailer delivery is `NOT VERIFIED`.
 5. Confirm the deployed fail-closed behavior (unauthenticated `401`, no-key `503`), that `/docs` answers 404, and that operator routes reject tenant keys.

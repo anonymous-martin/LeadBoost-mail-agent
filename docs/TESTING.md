@@ -47,7 +47,15 @@ python -m pytest -o addopts="" \
 REQUIRE_MIGRATION_WRAPPER_PG=1 python -m pytest -o addopts="" tests/test_migrate_release.py -v
 ```
 
-`REQUIRE_MIGRATION_WRAPPER_PG=1` turns an unreachable database into a failure instead of a skip.
+`REQUIRE_MIGRATION_WRAPPER_PG=1` turns an unreachable database into a failure instead of a skip. The same file also covers `scripts/migrate_preflight.py verify` (the read-only dry run of `SCHEMA_INIT_MODE=verify`).
+
+**Concurrent schema initialization** (real simultaneous processes against empty and wrapper-migrated disposable databases; the server must be able to `CREATE DATABASE`, and use a UTF-8 database for the other PostgreSQL suites):
+
+```bash
+REQUIRE_SCHEMA_INIT_PG=1 python -m pytest -o addopts="" tests/test_schema_init.py -v
+```
+
+`REQUIRE_SCHEMA_INIT_PG=1` turns an unreachable database into a failure instead of a skip. The always-run SQLite half of this file (modes, no-DDL guarantee, lifespan and worker wiring) is part of the ordinary deterministic suite.
 
 **Local SMTP protocol integration:**
 

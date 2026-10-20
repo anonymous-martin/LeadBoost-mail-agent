@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -90,6 +91,17 @@ class Settings(BaseSettings):
     # instead -- otherwise every worker process would start its own
     # scheduler and you'd get duplicate sends/duplicate reply polls.
     run_scheduler_in_process: bool = True
+
+    # --- Schema handling at process start ------------------------------------
+    # "create" (default): API and worker run db.init_db() -- create any MISSING tables, never alter
+    #   or drop -- serialized across processes by a PostgreSQL advisory lock, so several processes
+    #   starting together against an empty database no longer race. Convenient for local development
+    #   and tests; it is also what keeps a currently deployed service starting unchanged.
+    # "verify": the process runs NO DDL at all. It only checks (read-only) that every table and
+    #   column the models need exists, and refuses to start with a clear message if not. Use this
+    #   for deployed services: scripts/migrate_release.sh is then the only thing that creates or
+    #   changes the production schema. An invalid value stops startup (fail closed).
+    schema_init_mode: Literal["create", "verify"] = "create"
 
     # --- Safety toggles ----------------------------------------------------
     # When False, generated sends/replies are written to the DB as

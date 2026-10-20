@@ -61,6 +61,18 @@ def check_encryption_key() -> None:
     _r("INFO", "MAILBOX_ENCRYPTION_KEY", "must be the SAME value on the API and the worker, and stable across restarts/rollbacks")
 
 
+def check_schema_mode(settings) -> None:
+    if settings.schema_init_mode == "verify":
+        _r("PASS", "SCHEMA_INIT_MODE", "verify (this process runs no DDL at start; the migration wrapper is the only schema changer)")
+    else:
+        _r(
+            "WARN",
+            "SCHEMA_INIT_MODE",
+            "create (default): start-up creates MISSING tables, serialized by a database lock. For a deployed service prefer "
+            "verify, after `python scripts/migrate_preflight.py verify` passes against its database",
+        )
+
+
 def check_flags(settings) -> None:
     _r("INFO", "LIVE_SENDING_ENABLED", f"{settings.live_sending_enabled} (consumed by the worker's dispatch path; set per service)")
     _r("INFO", "AUTO_REPLY_ENABLED", f"{settings.auto_reply_enabled}")
@@ -156,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = get_settings()
     check_encryption_key()
+    check_schema_mode(settings)
     check_flags(settings)
     if args.role == "api":
         check_api(settings)

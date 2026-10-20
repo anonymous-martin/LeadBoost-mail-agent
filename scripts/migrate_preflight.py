@@ -16,11 +16,15 @@ Subcommands (all read-only except ``init``)
                   backup acknowledgement (see below).
 ``status``        read-only report of which migration steps the live schema
                   already satisfies. Heuristic markers, NOT proof.
-``init``          ``init_db()`` (``Base.metadata.create_all``) -- the very call
-                  the API and worker make on every start. Creates missing
-                  tables only; never alters or drops anything.
+``init``          ``init_db()`` (``Base.metadata.create_all``) -- creates missing
+                  tables only; never alters or drops anything. Concurrency-safe
+                  (PostgreSQL advisory lock), like the API/worker start-up call.
+``verify``        read-only dry run of exactly what ``SCHEMA_INIT_MODE=verify``
+                  checks at service start: every table and column the models need
+                  exists. Run it against the real database before switching a
+                  service to verify mode. Exit 5 if anything is missing.
 
-Guards (exit 2 = refused, 3 = unreachable, 4 = dispatch pre-check)
+Guards (exit 2 = refused, 3 = unreachable, 4 = dispatch pre-check, 5 = verify found gaps)
 -------------------------------------------------------------------
 * ``DATABASE_URL`` must be set in the *process environment*. A ``.env`` file or
   the built-in SQLite default is never accepted.
@@ -55,6 +59,7 @@ EXIT_OK = 0
 EXIT_REFUSED = 2
 EXIT_UNREACHABLE = 3
 EXIT_DISPATCH_BLOCK = 4
+EXIT_SCHEMA_NOT_READY = 5
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 DISPOSABLE_DB_PREFIX = "mailer_migrate_test_"
@@ -287,6 +292,22 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_verify(_args: argparse.Namespace) -> int:
+    target = validate_environment(apply=False)
+    mailer_db = _load_db(target)
+    _connect_check(mailer_db, target)
+    _say(f"startup schema check (SCHEMA_INIT_MODE=verify) for {target.redacted} -- read-only, no DDL:")
+    problems = mailer_db.schema_problems()
+    for problem in problems:
+        print(f"  [MISSING] {problem}", flush=True)
+    if problems:
+        _say(f"{len(problems)} problem(s): a service in verify mode would refuse to start. Run migrate_release.sh first.")
+        return EXIT_SCHEMA_NOT_READY
+    _say("every table and column the models need is present; a service in verify mode would start")
+    _say("(this is a structural check only -- use `status` for the migration markers)")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -295,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     gate.set_defaults(fn=cmd_gate)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     sub.add_parser("init").set_defaults(fn=cmd_init)
+    sub.add_parser("verify").set_defaults(fn=cmd_verify)
     args = parser.parse_args(argv)
     try:
         return args.fn(args)

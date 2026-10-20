@@ -68,7 +68,7 @@ import os
 import signal
 import time
 
-from mailer_agent.db import init_db, session_scope
+from mailer_agent.db import prepare_schema, session_scope
 from mailer_agent.followup.scheduler import start_scheduler, stop_scheduler
 from mailer_agent.followup.work_claiming import make_worker_id, release_all_claims
 from mailer_agent.mail.external_dispatch_worker import (
@@ -135,7 +135,7 @@ def graceful_shutdown(worker_id: str) -> None:
 
 
 if __name__ == "__main__":
-    init_db()
+    prepare_schema()
     install_signal_handlers()
 
     worker_id = make_worker_id()
