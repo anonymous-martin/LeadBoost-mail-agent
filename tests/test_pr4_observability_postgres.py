@@ -413,6 +413,19 @@ def test_inspection_script_contains_only_selects_and_the_read_only_setting():
     stmts = _inspect_statements()
     assert stmts[0].upper() == "SET DEFAULT_TRANSACTION_READ_ONLY = ON"
     assert all(s.split()[0].upper() == "SELECT" for s in stmts[1:])
+
+    # The full-table count is deliberately opt-in: psql -f must not execute it.
+    source_lines = INSPECT.read_text(encoding="utf-8").splitlines()
+    optional_count = "SELECT count(*) FILTER (WHERE direction = 'inbound')"
+    assert any(
+        line.lstrip().startswith("-- " + optional_count)
+        for line in source_lines
+    ), "the expensive full-table count must remain documented but commented out"
+    assert not any(
+        line.lstrip().startswith(optional_count)
+        for line in source_lines
+    ), "the expensive full-table count must not execute by default"
+
     body = "\n".join(stmts)
     assert not re.search(r"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|VACUUM|ANALYZE|COPY|LOCK)\b",
                          body, re.IGNORECASE)
@@ -427,13 +440,16 @@ def test_inspection_script_runs_on_real_postgres_in_a_read_only_session_and_repo
         with pytest.raises(Exception, match="read-only"):  # ... which really is enforced
             c.execute(text("DELETE FROM messages"))
         results = [c.execute(text(s)).all() for s in stmts[1:]]
-    settings, sizes, counters, active, locks, index_state, tables, inbound = results
+
+    # The default script omits the optional full-table COUNT, so seven query
+    # results follow the initial read-only SET statement.
+    assert len(results) == 7
+    settings, sizes, counters, active, locks, index_state, tables = results
     assert settings[0].lock_timeout_default is not None and sizes and counters
     assert any(r.transaction_age is not None for r in active), "the open writer must be visible as an active transaction"
     assert any(r.mode == "RowExclusiveLock" and r.granted for r in locks), "and as a RowExclusiveLock on messages"
     assert index_state == []  # pre-PR4 shape: no index yet
     assert tables[0].worker_runtime_status is None and tables[0].worker_cycle_status is None
-    assert inbound[0].total_rows >= 1
 
 
 # =============================================================== aggregates on real PostgreSQL types
