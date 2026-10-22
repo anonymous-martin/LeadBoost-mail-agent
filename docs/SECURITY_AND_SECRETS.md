@@ -10,7 +10,7 @@ Related: [system design](architecture/SYSTEM_DESIGN.md), [API and integration](A
 |---|---|---|
 | LeadBoost backend (per LeadBoost organization) | Tenant key in `X-API-Key` | Its own organization's mailboxes, dispatches and conversations |
 | Inbound-parse provider (optional) | Tenant key in `X-API-Key` | `POST /webhooks/inbound-email` for that organization |
-| Operator | `X-System-Operator-Key` | Process-wide diagnostics only: `/system/config`, `/system/metrics/llm`, `/system/integration/validate` |
+| Operator | `X-System-Operator-Key` | Process-wide diagnostics only: `/system/config`, `/system/metrics/llm`, `/system/integration/validate`, `/system/metrics/dispatch`, `/system/metrics/worker`, `/system/metrics/inbound` (aggregates; no tenant identifiers, addresses, message content or raw error text) |
 | Mailer worker | No network identity; holds `DATABASE_URL`, the encryption key, LLM key | Everything in the database; it is trusted infrastructure |
 | Browser | None | Nothing; it must never see Mailer |
 

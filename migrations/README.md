@@ -122,7 +122,45 @@ work-queue indexes.
     once. SQLite note: an inline UNIQUE from pre-M3 `CREATE TABLE` cannot be
     dropped there -- recreate development databases from the models.
 
-**Wrapper evidence.** The guarded wrapper `scripts/migrate_release.sh` (with `--status` and `--check-only`) is covered in CI against a disposable PostgreSQL by `tests/test_migrate_release.py`. It has also been run against the dedicated Supabase database: all 11 steps completed and the final `--status` reported the expected markers present (operator-reported). A code deployment and a migration are separate release actions: the wrapper is never run by startup or by every deploy.
+12. `010_worker_runtime_status.py` -- PR4 (operator observability): creates
+    `worker_runtime_status` (one row per scheduler process: opaque random instance
+    id, role, started / heartbeat / stopped timestamps) and `worker_cycle_status`
+    (one row per process and job kind: latest outcome label and whitelisted
+    integer counters), and the PARTIAL index `ix_messages_inbound_created_at` on
+    `messages(created_at) WHERE direction = 'inbound'` that serves the
+    operator-only inbound aggregate. Purely additive: no business column is
+    altered, nothing is dropped, and the tables hold no tenant, contact, address,
+    Message-ID, content, credential or error text. Idempotent (create-if-absent,
+    model-driven DDL). **The index build takes a SHARE lock on `messages` (reads
+    continue, every write waits) for its duration, and the API writes `messages`
+    too (inbound-email webhook, message approval, LeadBoost outreach-actions), so
+    suspending the worker alone is not enough. Measure the real table size, write
+    rate and open transactions first (`scripts/migrate_010_inspect.sql`, runbook
+    section 9.1.1) and agree a write-interruption window; the PR's numbers are
+    synthetic.** On PostgreSQL the migration sets `lock_timeout` (default 5000 ms,
+    `MIGRATION_010_LOCK_TIMEOUT_MS`, clamped 100-300000, never disableable) and an
+    optional `statement_timeout` (`MIGRATION_010_STATEMENT_TIMEOUT_MS`), so it
+    gives up instead of queueing behind a long writer; the transaction (including
+    the new tables) is rolled back, nothing changes, and it exits non-zero. For a
+    table too large to block, build the index by hand first with `CREATE INDEX
+    CONCURRENTLY` (exact statement in the migration docstring); the migration
+    skips an existing index but refuses an INVALID one. **The wrapper itself also
+    contends with writers**: steps such as 001 run `CREATE INDEX IF NOT EXISTS ...
+    ON messages(...)`, which needs the table's SHARE lock even when the index exists
+    (observed: with a writer open, the wrapper hung at step 1/12). Set
+    `MIGRATE_LOCK_TIMEOUT_MS` (100-300000, off by default) for the wrapper run to
+    apply `lock_timeout` to every statement of every step; see the wrapper header
+    and runbook section 9.1.1 (including the connection-pooler caveat).
+    **Apply BEFORE deploying PR4 code to a service running
+    `SCHEMA_INIT_MODE=verify`:** the new tables are in the ORM metadata, so such a
+    service refuses to start until they exist (read-only check: `python
+    scripts/migrate_preflight.py verify`, exit 5 and `missing table
+    worker_runtime_status`). `--downgrade` drops the two tables and the index; it
+    discards only operator telemetry (a running worker recreates it), never
+    business data. Code from before PR4 ignores these tables, so rolling the
+    *code* back does not require the downgrade.
+
+**Wrapper evidence.** The guarded wrapper `scripts/migrate_release.sh` (with `--status` and `--check-only`) is covered in CI against a disposable PostgreSQL by `tests/test_migrate_release.py`. At the time of that observation the canonical sequence had 11 steps; it has also been run against the dedicated Supabase database: all 11 steps completed and the final `--status` reported the expected markers present (operator-reported). Migration 010 (PR4) has NOT been run against that database -- applying it is an operator-controlled release step. A code deployment and a migration are separate release actions: the wrapper is never run by startup or by every deploy.
 
 **Startup race (fixed in code).** `init_db()` (create-missing-tables) runs at API and worker start in the default `SCHEMA_INIT_MODE=create`. Two processes starting together against an empty database produced a duplicate-sequence error once on hosted infrastructure. `init_db()` now takes a transaction-scoped PostgreSQL advisory lock, so concurrent callers queue and later ones find the tables already present; this was reproduced and fixed on disposable PostgreSQL (`tests/test_schema_init.py`), not re-observed on hosted infrastructure. Still run the wrapper before the first start of a new database: it remains the source of truth, because `init_db()` creates tables only and applies none of the canonical constraints/indexes. A deployed service can set `SCHEMA_INIT_MODE=verify` so it runs no DDL at all; `python scripts/migrate_preflight.py verify` is the read-only dry run of that check.
 
@@ -181,7 +219,7 @@ release step, **before** deploying code that needs the new schema.
 7. Deploy the new API and worker revision together, then resume the worker.
 
 A database that has only had `init_db()` (the services run it at every start) is **not**
-migrated; the wrapper always runs `init_db()` and then the 11 steps, in order.
+migrated; the wrapper always runs `init_db()` and then the 12 steps, in order.
 
 The tool refuses a missing/SQLite/non-PostgreSQL URL, an unacknowledged apply,
 and (migration 007) an upgrade that would strand non-terminal dispatches. It
@@ -208,11 +246,13 @@ python migrations/006_mailboxes.py
 python migrations/007_external_dispatch_mailbox.py
 python migrations/008_external_dispatch_deferred_message.py
 python migrations/009_messages_mailbox_scoped_dedupe.py
+python migrations/010_worker_runtime_status.py
 ```
 
 To revert 005 only: `python migrations/005_external_dispatch_grounding_context.py --downgrade`.
 To revert 006 only (destroys all mailbox records/credentials): `python migrations/006_mailboxes.py --downgrade`.
 To revert 007 / 008 / 009: `--downgrade` on each (008 refuses while any dispatch has `message_id` NULL; 009 refuses if a Message-ID is now stored more than once).
+To revert 010 (drops operator telemetry only -- two status tables and one index; no business data): `python migrations/010_worker_runtime_status.py --downgrade`.
 
 Safe to re-run the whole sequence any time; every step no-ops on columns/
 indexes/constraints that already exist.

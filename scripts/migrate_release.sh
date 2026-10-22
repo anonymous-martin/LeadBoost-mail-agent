@@ -14,6 +14,19 @@
 #                           (the application's own default is a local SQLite file).
 #   MIGRATE_CONFIRM_BACKUP  (apply only) I_HAVE_A_VERIFIED_BACKUP_OF_<database name>
 #
+# Optional environment (apply only):
+#   MIGRATE_LOCK_TIMEOUT_MS  100..300000. Sets PostgreSQL lock_timeout (via PGOPTIONS) for EVERY statement
+#                           of this run, so a step that cannot get its table lock gives up instead of
+#                           waiting behind a long writer -- while it waits, every NEW writer queues behind
+#                           it. RECOMMENDED when any writer (the API's webhook/approve routes, the worker)
+#                           may be active: several existing steps run CREATE INDEX IF NOT EXISTS on
+#                           `messages`, which needs the table's SHARE lock even when the index exists.
+#                           A failed step reports its number; the run stops and later steps are not run.
+#                           Off by default (no behaviour change). If a connection pooler rejects the
+#                           startup option ("unsupported startup parameter: options"), use a direct or
+#                           session-mode connection for migrations, or quiesce all writers instead.
+#                           Migration 010 additionally applies its own lock_timeout (see its docstring).
+#
 # Test-only: MIGRATE_DISPOSABLE_TEST_DB=yes waives the acknowledgement for a
 # LOOPBACK host and a database named mailer_migrate_test_* only. See
 # scripts/migrate_preflight.py for every guard.
@@ -56,6 +69,7 @@ STEPS=(
   "migrations/007_external_dispatch_mailbox.py"
   "migrations/008_external_dispatch_deferred_message.py"
   "migrations/009_messages_mailbox_scoped_dedupe.py"
+  "migrations/010_worker_runtime_status.py"
 )
 
 if [ "$MODE" = status ]; then
@@ -68,6 +82,22 @@ if [ "$MODE" = check ]; then
   "${PREFLIGHT[@]}" status
   echo "[migrate] check-only: no changes were made."
   exit 0
+fi
+
+# Opt-in: fail fast instead of queueing behind writers (see the header). Validated strictly; applies to
+# every Python process this script starts, because libpq reads PGOPTIONS from the environment.
+if [ -n "${MIGRATE_LOCK_TIMEOUT_MS:-}" ]; then
+  case "$MIGRATE_LOCK_TIMEOUT_MS" in
+    *[!0-9]*) echo "[migrate] MIGRATE_LOCK_TIMEOUT_MS must be an integer number of milliseconds (100..300000)." >&2; exit 2 ;;
+  esac
+  if [ "$MIGRATE_LOCK_TIMEOUT_MS" -lt 100 ] || [ "$MIGRATE_LOCK_TIMEOUT_MS" -gt 300000 ]; then
+    echo "[migrate] MIGRATE_LOCK_TIMEOUT_MS must be between 100 and 300000 (0 is refused: PostgreSQL reads it as 'wait forever')." >&2
+    exit 2
+  fi
+  export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c lock_timeout=${MIGRATE_LOCK_TIMEOUT_MS}"
+  echo "[migrate] lock_timeout=${MIGRATE_LOCK_TIMEOUT_MS}ms applied to every statement of this run."
+else
+  echo "[migrate] NOTE: no MIGRATE_LOCK_TIMEOUT_MS set -- a step that needs a table lock will wait for active writers (and queue new writers behind it). See the header." >&2
 fi
 
 # Apply: every guard first. A non-zero exit here (set -e) stops everything.

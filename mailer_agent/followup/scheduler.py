@@ -8,6 +8,7 @@ and conversation-aware scheduling as the single source of truth.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -15,14 +16,96 @@ from mailer_agent.config import get_settings
 from mailer_agent.db import session_scope
 from mailer_agent.followup.engine import run_followup_cycle
 from mailer_agent.mail.imap_reader import fetch_unseen_replies
-from mailer_agent.mail.mailbox_inbound import poll_all_mailboxes
+from mailer_agent.mail.mailbox_inbound import (
+    poll_all_mailboxes,  # noqa: F401 - kept importable; the job uses the report variant
+    poll_all_mailboxes_report,
+    summarize_mailbox_cycle,
+)
 from mailer_agent.mail.reply_handler import process_inbound_email
 from mailer_agent.models import Contact
+from mailer_agent.worker_status import (
+    BUCKET_AMBIGUOUS,
+    KIND_EXTERNAL_DISPATCH,
+    KIND_GENERATION,
+    KIND_INBOUND_LEGACY,
+    KIND_INBOUND_MAILBOX,
+    OUTCOME_COMPLETED,
+    OUTCOME_DEGRADED,
+    OUTCOME_FAILED,
+    ROLE_SCHEDULER,
+    CycleReport,
+    WorkerStatusRecorder,
+    classification_flag,
+    classify_inbound_result,
+    summarize_dispatch_results,
+    summarize_generation_results,
+)
 
 logger = logging.getLogger("mailer_agent.scheduler")
 settings = get_settings()
 
 _scheduler: BackgroundScheduler | None = None
+
+# PR4: this process's durable liveness / cycle-outcome writer (mailer_agent/worker_status.py).
+# None until start_scheduler() runs, so calling a job function directly (tests, scripts) records
+# nothing and touches no table.
+_runtime_recorder: WorkerStatusRecorder | None = None
+
+
+def _record_cycle(kind: str, outcome: str, counts=None, error_type=None) -> None:
+    """Record one job cycle's outcome. Called only AFTER the work it describes has returned, in its
+    own session, so it can never affect a claim, a send, or an already persisted outcome. Never
+    raises (the recorder swallows its own failures; this guards the call itself as well)."""
+    recorder = _runtime_recorder
+    if recorder is None:
+        return
+    try:
+        recorder.record_cycle(kind, outcome, counts, error_type)
+    except Exception:  # noqa: BLE001
+        logger.warning("Worker cycle outcome was not recorded (%s)", kind)
+
+
+def worker_heartbeat_job() -> None:
+    """PR4: refresh this process's liveness row. Proves the process is alive and its scheduler is
+    ticking -- nothing about SMTP, IMAP or the LLM. A failed write is logged (class name only) and
+    surfaces to the operator as a stale heartbeat; it never retries work or alters any outcome."""
+    recorder = _runtime_recorder
+    if recorder is not None:
+        recorder.heartbeat()
+
+
+def mark_runtime_stopped() -> bool:
+    """Graceful-stop marker for this process's liveness row (no-op if the scheduler never started).
+
+    Callers invoke it at the very END of their shutdown sequence, after in-flight work has drained,
+    so "stopped" is never reported while a send is still in flight. A process killed without
+    cleanup never gets here and simply ages into "stale"."""
+    global _runtime_recorder
+    recorder = _runtime_recorder
+    if recorder is None:
+        return False
+    try:
+        return recorder.mark_stopped()
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        _runtime_recorder = None  # once stopped, nothing more is recorded for this process
+
+
+def _tally_legacy_result(tally: dict, result) -> None:
+    """Fold one legacy-path handler result into bucket counters. Never raises, keeps no content."""
+    try:
+        bucket = classify_inbound_result(result)
+        if bucket == BUCKET_AMBIGUOUS:  # the legacy handler reports no reason; fold into unmatched
+            bucket = "unmatched"
+        tally[f"handled_{bucket}"] = tally.get(f"handled_{bucket}", 0) + 1
+        flag = classification_flag(result)
+        if flag is True:
+            tally["classification_succeeded"] = tally.get("classification_succeeded", 0) + 1
+        elif flag is False:
+            tally["classification_failed"] = tally.get("classification_failed", 0) + 1
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("legacy inbound tally skipped (%s)", type(exc).__name__)
 
 
 def poll_replies_job() -> None:
@@ -34,18 +117,34 @@ def poll_replies_job() -> None:
         return
     
     logger.info(f"Fetched {len(emails)} unseen email(s)")
-    
-    with session_scope() as db:
-        for email_in in emails:
-            try:
-                # Legacy deployment-global IMAP poll: trusted internal input, single-tenant by
-                # design -> explicitly unscoped (organization_id=None). Never a fallback for the
-                # per-mailbox path (poll_mailbox_inboxes_job).
-                result = process_inbound_email(db, email_in, organization_id=None)
-                action = result.get("action", "unknown")
-                logger.info(f"Processed inbound from {email_in.from_email}: {action}")
-            except Exception as e:
-                logger.exception(f"Failed to process inbound email from {email_in.from_email}: {e}")
+
+    # PR4: the legacy deployment-global path is instrumented SEPARATELY from mailbox-bound polling
+    # (KIND_INBOUND_LEGACY vs KIND_INBOUND_MAILBOX). Evidence is limited on purpose: fetch_unseen_replies()
+    # returns [] for "not configured", "nothing new" AND "the poll failed", so an empty fetch proves
+    # nothing and records nothing. Only a non-empty fetch is a cycle with observable outcomes.
+    tally: dict = {"emails_fetched": len(emails), "handler_failures": 0}
+    try:
+        with session_scope() as db:
+            for email_in in emails:
+                try:
+                    # Legacy deployment-global IMAP poll: trusted internal input, single-tenant by
+                    # design -> explicitly unscoped (organization_id=None). Never a fallback for the
+                    # per-mailbox path (poll_mailbox_inboxes_job).
+                    result = process_inbound_email(db, email_in, organization_id=None)
+                    action = result.get("action", "unknown")
+                    logger.info(f"Processed inbound from {email_in.from_email}: {action}")
+                    _tally_legacy_result(tally, result)
+                except Exception as e:
+                    logger.exception(f"Failed to process inbound email from {email_in.from_email}: {e}")
+                    tally["handler_failures"] += 1
+    except Exception as exc:
+        _record_cycle(KIND_INBOUND_LEGACY, OUTCOME_FAILED, tally, exc)
+        raise
+    _record_cycle(
+        KIND_INBOUND_LEGACY,
+        OUTCOME_DEGRADED if tally["handler_failures"] else OUTCOME_COMPLETED,
+        tally,
+    )
 
 
 def poll_mailbox_inboxes_job() -> None:
@@ -55,7 +154,13 @@ def poll_mailbox_inboxes_job() -> None:
     deployment-global legacy path and never acts as a fallback for this one.
     poll_all_mailboxes never raises; per-mailbox failures are in its outcomes.
     """
-    outcomes = poll_all_mailboxes()
+    report = poll_all_mailboxes_report()
+    try:
+        cycle_outcome, cycle_counts, cycle_error = summarize_mailbox_cycle(report)
+        _record_cycle(KIND_INBOUND_MAILBOX, cycle_outcome, cycle_counts, cycle_error)
+    except Exception:  # noqa: BLE001 - observability never breaks polling
+        logger.warning("Mailbox inbound cycle outcome was not summarised")
+    outcomes = report.outcomes
     if not outcomes:
         return
     handled = sum(o.processed for o in outcomes)
@@ -194,11 +299,22 @@ def dispatch_external_dispatches_job() -> None:
     """
     from mailer_agent.mail.external_dispatch_worker import run_external_dispatch_cycle
 
+    # run_external_dispatch_cycle catches and logs its own database errors, so "no exception" is not
+    # "success": the CycleReport tells an aborted cycle from an empty one (PR4).
+    report = CycleReport()
     try:
-        results = run_external_dispatch_cycle()
-    except Exception:
+        results = run_external_dispatch_cycle(report=report)
+    except Exception as exc:
         logger.exception("dispatch_external_dispatches_job failed")
+        _record_cycle(KIND_EXTERNAL_DISPATCH, OUTCOME_FAILED, None, exc)
         return
+    cycle_counts = summarize_dispatch_results(results)
+    if report.aborted:
+        _record_cycle(KIND_EXTERNAL_DISPATCH, OUTCOME_FAILED, cycle_counts, "DatabaseErrorCaughtByCycle")
+    elif cycle_counts["outcome_not_persisted"]:
+        _record_cycle(KIND_EXTERNAL_DISPATCH, OUTCOME_DEGRADED, cycle_counts)
+    else:
+        _record_cycle(KIND_EXTERNAL_DISPATCH, OUTCOME_COMPLETED, cycle_counts)
     if results:
         counts: dict[str, int] = {}
         for r in results:
@@ -215,11 +331,20 @@ def generate_external_dispatches_job() -> None:
     """
     from mailer_agent.mail.outreach_generation_worker import run_generation_cycle
 
+    report = CycleReport()
     try:
-        results = run_generation_cycle()
-    except Exception:
+        results = run_generation_cycle(report=report)
+    except Exception as exc:
         logger.exception("generate_external_dispatches_job failed")
+        _record_cycle(KIND_GENERATION, OUTCOME_FAILED, None, exc)
         return
+    cycle_counts = summarize_generation_results(results)
+    if report.aborted:
+        _record_cycle(KIND_GENERATION, OUTCOME_FAILED, cycle_counts, "DatabaseErrorCaughtByCycle")
+    elif cycle_counts["outcome_not_persisted"]:
+        _record_cycle(KIND_GENERATION, OUTCOME_DEGRADED, cycle_counts)
+    else:
+        _record_cycle(KIND_GENERATION, OUTCOME_COMPLETED, cycle_counts)
     if results:
         counts: dict[str, int] = {}
         for r in results:
@@ -261,14 +386,31 @@ def recover_external_dispatch_leases_job() -> None:
         logger.warning("External dispatch lease recovery resolved %d row(s) to UNKNOWN", n)
 
 
-def start_scheduler() -> BackgroundScheduler:
+def start_scheduler(role: str = ROLE_SCHEDULER) -> BackgroundScheduler:
     """
     Start the unified scheduler.
+
+    ``role`` labels this process in the operator worker metrics ("worker" for worker.py,
+    "api_embedded" for an API with RUN_SCHEDULER_IN_PROCESS=true). It has no other effect.
     """
-    global _scheduler
+    global _scheduler, _runtime_recorder
     if _scheduler is not None:
         return _scheduler
-    
+
+    # The embedded API lifespan can be entered again in the same process.
+    # Reopen the dispatch gate only if the previous lifecycle has no in-flight work.
+    # Do not use DispatchRuntime.reset(): it discards in-flight bookkeeping.
+    from mailer_agent.mail.external_dispatch_worker import default_runtime
+
+    if not default_runtime.resume_if_idle():
+        raise RuntimeError(
+            "Cannot start scheduler while previous external dispatches remain in flight"
+        )
+
+    # A fresh random process identity per start (never hostname/WORKER_ID), created here but written
+    # only by the heartbeat job below -- so starting a scheduler touches no table by itself.
+    _runtime_recorder = WorkerStatusRecorder(role)
+
     scheduler = BackgroundScheduler(
         timezone="UTC",
         job_defaults={
@@ -357,6 +499,19 @@ def start_scheduler() -> BackgroundScheduler:
         seconds=300,
         id="health_check",
         max_instances=1
+    )
+
+    # PR4: liveness heartbeat. First run is immediate (next_run_time=now) so the process is visible
+    # to the operator within a second of starting, then every worker_heartbeat_interval_seconds.
+    # It runs on the same default 10-thread pool as the 9 other jobs above, each capped at one
+    # instance, so a saturated pool still leaves it a slot. Floor of 5 s guards a misconfiguration.
+    scheduler.add_job(
+        worker_heartbeat_job,
+        "interval",
+        seconds=max(5, int(settings.worker_heartbeat_interval_seconds)),
+        id="worker_heartbeat",
+        max_instances=1,
+        next_run_time=datetime.now(UTC),
     )
     
     scheduler.start()

@@ -42,7 +42,11 @@ AUTH_DEPS = {
 PUBLIC_PATHS = {"/health", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 # PR3: process-wide routes that are deliberately NOT tenant-key routes (a tenant key must not open them).
 # They use require_system_operator instead; tests/test_pr3_system_operator_boundary.py covers their access.
-OPERATOR_PATHS = {"/system/config", "/system/metrics/llm", "/system/integration/validate"}
+OPERATOR_PATHS = {
+    "/system/config", "/system/metrics/llm", "/system/integration/validate",
+    # PR4: process-wide operator observability (read-only). Operator credential only; never a tenant key.
+    "/system/metrics/dispatch", "/system/metrics/worker", "/system/metrics/inbound",
+}
 
 KEY_A, KEY_B, LEGACY = "key-a-" + "a" * 20, "key-b-" + "b" * 20, "legacy-" + "l" * 20
 ORG_A, ORG_B = "org-a", "org-b"

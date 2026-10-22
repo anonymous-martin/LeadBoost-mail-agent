@@ -22,7 +22,7 @@ The two systems hold **inverse** mappings of the same secret:
 | LeadBoost backend | `MAILING_AGENT_ORG_API_KEYS` | `{"<leadboost_org_id>": "<mailer_tenant_key>"}` |
 | LeadBoost backend | `MAILING_AGENT_BASE_URL` | `https://<mailer-api-host>` (no key in the URL) |
 
-Use one distinct key per LeadBoost organization. These keys are not the operator key (`X-System-Operator-Key`, used only for `/system/config`, `/system/metrics/llm` and `/system/integration/validate`) and not the mailbox encryption key. See [SECURITY_AND_SECRETS.md](SECURITY_AND_SECRETS.md).
+Use one distinct key per LeadBoost organization. These keys are not the operator key (`X-System-Operator-Key`, used only for `/system/config`, `/system/metrics/llm`, `/system/integration/validate` and `/system/metrics/{dispatch,worker,inbound}`) and not the mailbox encryption key. See [SECURITY_AND_SECRETS.md](SECURITY_AND_SECRETS.md).
 
 | Status | Meaning |
 |---|---|
@@ -114,7 +114,7 @@ Mail that cannot be matched to a contact in that organization is not stored (see
 | `GET /health` | none | The API process is up. No database or worker probe. |
 | `GET /system/health` | tenant key | Organization-scoped counts from the database; implies the database is reachable. |
 | `GET /system/metrics/classification`, `/system/metrics/states` | tenant key | Organization-scoped metrics. |
-| `GET /system/config`, `/system/metrics/llm`, `/system/integration/validate` | `X-System-Operator-Key` | Process-wide, operator only. `503` when the operator key is unset. |
+| `GET /system/config`, `/system/metrics/llm`, `/system/integration/validate`, `/system/metrics/dispatch`, `/system/metrics/worker`, `/system/metrics/inbound` | `X-System-Operator-Key` | Process-wide, operator only. `503` when the operator key is unset. The last three are read-only aggregates described in [OPERATOR_OBSERVABILITY.md](OPERATOR_OBSERVABILITY.md); they are not per-tenant analytics and a tenant key never opens them. |
 
 There is no `/metrics` route (the deployed API answered 404; `HOSTED OBSERVED`). The worker has no HTTP endpoint; observe it through its logs.
 

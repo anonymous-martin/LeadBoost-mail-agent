@@ -64,6 +64,7 @@ from mailer_agent.llm.agent import draft_message
 from mailer_agent.mail.exact_message import create_authorized_message
 from mailer_agent.mail.external_dispatch_worker import DispatchRuntime, default_runtime
 from mailer_agent.models import Campaign, Contact, ExternalDispatch
+from mailer_agent.worker_status import CycleReport
 
 logger = logging.getLogger("mailer_agent.mail.outreach_generation_worker")
 settings = get_settings()
@@ -305,8 +306,14 @@ def run_generation_cycle(
     worker_id: Optional[str] = None,
     runtime: Optional[DispatchRuntime] = None,
     max_items: Optional[int] = None,
+    report: Optional[CycleReport] = None,
 ) -> list[GenerationResult]:
-    """One polling cycle: claim -> generate, one dispatch at a time. A database error ends the cycle."""
+    """One polling cycle: claim -> generate, one dispatch at a time. A database error ends the cycle.
+
+    The error is caught and logged here, so the list alone cannot tell "no work" from "aborted";
+    a caller that needs the difference passes a ``CycleReport`` (``report.aborted``). Behaviour and
+    return value are unchanged either way.
+    """
     runtime = runtime or default_runtime
     limit = max_items if max_items is not None else settings.external_dispatch_max_per_cycle
     results: list[GenerationResult] = []
@@ -319,6 +326,8 @@ def run_generation_cycle(
             )
         except SQLAlchemyError:
             logger.exception("external_dispatch generation cycle aborted by a database error")
+            if report is not None:
+                report.aborted = True
             break
         if result is None:
             break

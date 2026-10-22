@@ -139,7 +139,7 @@ def check_operator_key(settings) -> None:
 
     key = settings.system_operator_api_key.get_secret_value().strip()
     if not key:
-        _r("INFO", "SYSTEM_OPERATOR_API_KEY", "not set: /system/config, /system/metrics/llm and /system/integration/validate answer 503 (fail closed). Set it only if an operator needs those process-wide routes")
+        _r("INFO", "SYSTEM_OPERATOR_API_KEY", "not set: /system/config, /system/metrics/llm, /system/integration/validate and /system/metrics/{dispatch,worker,inbound} answer 503 (fail closed). Set it only if an operator needs those process-wide routes")
         return
     if deps._matches_tenant_key(key):
         _r("FAIL", "SYSTEM_OPERATOR_API_KEY", "equals a tenant API key (API_KEY / ORG_KEY_MAP / ORG_KEYS_*): the API REFUSES TO START. Use a distinct value")

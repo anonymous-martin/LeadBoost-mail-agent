@@ -167,6 +167,18 @@ jobs:
         run: |
           python -m pytest -o addopts="" tests/test_schema_init.py -v
 
+      # PR4 operator observability: migration 010 on a fresh and an already-migrated disposable database,
+      # idempotency, read-only verify, downgrade touching no business data, aggregate semantics on real
+      # timestamptz/timestamp columns, the recovery-sweep cross-check, and the EXPLAIN plans behind the
+      # index review. REQUIRE_PR4_OBSERVABILITY_PG=1 turns a missing/unreachable PostgreSQL into a hard
+      # FAILURE, never a skip.
+      - name: Operator observability against disposable PostgreSQL
+        env:
+          POSTGRES_TEST_URL: postgresql+psycopg2://mailer_agent:mailer_agent_test_pw@localhost:5432/mailer_agent_test
+          REQUIRE_PR4_OBSERVABILITY_PG: "1"
+        run: |
+          python -m pytest -o addopts="" tests/test_pr4_observability_postgres.py -v
+
   local-smtp:
     name: Local SMTP protocol integration
     runs-on: ubuntu-24.04
@@ -226,14 +238,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+
       - name: Install a disposable IMAP server
+        timeout-minutes: 10
         # Throw-away local Dovecot on 127.0.0.1 with a self-signed cert and
         # generated accounts; no external network or real mailbox is used.
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y dovecot-imapd
-          sudo systemctl stop dovecot || true
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            update
 
+          sudo DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            install -y dovecot-imapd
+
+          sudo systemctl stop dovecot || true
       - name: Run M3 IMAP end-to-end + C12 full-chain tests
         # Root is needed so Dovecot can drop to its service users.
         env:

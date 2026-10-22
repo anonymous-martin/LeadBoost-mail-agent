@@ -4,7 +4,8 @@ PR3 -- /system/*: organization-scoped monitoring vs process-wide operator diagno
 * TENANT routes (``/system/health``, ``/system/metrics/classification``, ``/system/metrics/states``)
   keep tenant-key authentication and per-organization scoping, and no longer return any process-wide
   data (``/system/health`` used to add ``llm_metrics_process_wide`` and the API's ``settings`` flags).
-* OPERATOR routes (``/system/config``, ``/system/metrics/llm``, ``/system/integration/validate``) need
+* OPERATOR routes (``/system/config``, ``/system/metrics/llm``, ``/system/integration/validate`` and, from PR4,
+  ``/system/metrics/{dispatch,worker,inbound}``) need
   the separate ``X-System-Operator-Key`` credential (SYSTEM_OPERATOR_API_KEY). A tenant key -- or the
   legacy API_KEY -- never opens them, they need no tenant key, and they fail closed.
 
@@ -43,7 +44,14 @@ ORG_A, ORG_B = "org-a", "org-b"
 OP_HEADER = "X-System-Operator-Key"
 
 TENANT_PATHS = {"/system/health", "/system/metrics/classification", "/system/metrics/states"}
-OPERATOR_PATHS = ["/system/config", "/system/metrics/llm", "/system/integration/validate"]
+OPERATOR_PATHS = [
+    "/system/config", "/system/metrics/llm", "/system/integration/validate",
+    # PR4 -- process-wide operator observability. Added here deliberately: every parametrized
+    # operator test below (tenant key rejected, legacy key rejected, wrong/missing/empty key, fail-closed
+    # with no configured operator key, dev opt-out never opens it, invalid tenant config, key collision)
+    # now also runs against these three. Functional/privacy tests: tests/test_pr4_*.py.
+    "/system/metrics/dispatch", "/system/metrics/worker", "/system/metrics/inbound",
+]
 SECRETS = (OP_KEY, KEY_A, KEY_B, LEGACY)
 
 

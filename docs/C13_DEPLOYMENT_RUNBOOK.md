@@ -143,14 +143,17 @@ Steps are in order. Do not start a step before the previous one is confirmed.
 8. **Apply the guarded, ordered migration only after explicit operator approval** and the
    backup acknowledgement the tool requires: `MIGRATE_CONFIRM_BACKUP=I_HAVE_A_VERIFIED_BACKUP_OF_<database name>`
    (the database name the tool printed) `scripts/migrate_release.sh`. The wrapper runs
-   `init_db()` and then the canonical **11 steps** in order (`migrations/README.md`).
+   `init_db()` and then the canonical **12 steps** in order (`migrations/README.md`; step 12 is the PR 4
+   observability migration 010).
 9. **If a step fails, stop immediately** and use the recovery procedure (sections 5 and 9).
    Do not run later steps manually, do not run steps individually, and do not
    `stamp`/skip anything.
 10. **Verify the final schema state and health**: re-run `--status` (every marker present),
     `GET https://<mailer-api-host>/health` (liveness only), and an authenticated
     `GET /system/health` with a tenant key (key mapping + database reachability, API only).
-    There is no worker liveness signal (section 6): check the worker's status and logs.
+    Worker liveness: once the PR 4 code is deployed **and** migration 010 applied, the operator-only
+    `GET /system/metrics/worker` reports a database-backed heartbeat (section 6). Until then -- and until it has been
+    observed on the hosted worker -- there is no worker liveness signal: check the worker's status and logs.
 11. **Complete tenant-key and mailbox provisioning before linking LeadBoost.** Confirm each
     tenant key maps to the Mailer organization that will own the mailbox, and that exactly one
     **ACTIVE** mailbox exists per organization (`POST /mailboxes`, normally issued by
@@ -342,11 +345,13 @@ verified-empty first bootstrap there is nothing to drain; do not record that any
 |---|---|---|---|
 | Mailer `GET /health` | none | The API process is up and serving. Returns exactly `{"status":"ok"}` | Database, worker, SMTP, IMAP, readiness -- and **no configuration**: it does not report `LIVE_SENDING_ENABLED` or `AUTO_REPLY_ENABLED` (earlier revisions did) |
 | Mailer `GET /system/health` | a tenant API key | Auth + key mapping + database queries work, for that org. Returns **only that organisation's** counts (earlier revisions also returned process-wide LLM counters and the API's flags; they were removed) | Worker liveness, SMTP/IMAP, any process-wide state |
-| Worker | -- | **No liveness signal exists.** Detect failure from service status/restarts and logs | -- |
+| Worker | operator key, `GET /system/metrics/worker` | **PR 4, not yet deployed or observed anywhere:** a heartbeat `fresh`/`stale`/`stopped` per scheduler process (requires migration 010). Until it has been observed on the hosted worker, detect failure from service status/restarts and logs | SMTP/IMAP/LLM connectivity or job success -- a fresh heartbeat is process liveness only (see `OPERATOR_OBSERVABILITY.md`) |
 
 Render's health check on `/health` therefore only gates routing to a live
-process. `/health` is unauthenticated by design and now minimal; a real worker
-liveness signal is C15. **Do not claim the worker is monitored** until one exists.
+process. `/health` is unauthenticated by design and now minimal. PR 4 adds a worker
+liveness signal in code (`/system/metrics/worker`); **do not claim the worker is monitored**
+until that endpoint has been observed reporting a fresh heartbeat from the deployed worker,
+and then only for what a heartbeat shows (the process is alive and its scheduler ticking).
 
 ### Where to look for each fact
 
@@ -374,6 +379,9 @@ process and is not tenant data. They are separated:
 | `GET /system/config` | **Process-wide**: the API process's non-secret settings (including its `LIVE_SENDING_ENABLED` / `AUTO_REPLY_ENABLED`, which are **not** the worker's) | Operator key: `X-System-Operator-Key` |
 | `GET /system/metrics/llm` | **Process-wide**: LLM provider call counters | Operator key |
 | `GET /system/integration/validate` | **Process-wide**: wiring/database checks; on failure it returns the raw error text, for the operator | Operator key |
+| `GET /system/metrics/dispatch` | **Process-wide** (all organizations): dispatch counts by state, queue depth/age, stale `sending`, `unknown` count. `sent` = SMTP accepted, not delivered. No identifiers or error text | Operator key |
+| `GET /system/metrics/worker` | **Process-wide**: scheduler-process heartbeat and latest job-cycle outcomes. Opaque random process ids only | Operator key |
+| `GET /system/metrics/inbound` | **Process-wide**: mailbox-poll cycle evidence, legacy global-IMAP path (separate), persisted inbound counts. Aggregates only | Operator key |
 
 Access rules (the operator routes are independent of tenant keys):
 
@@ -463,27 +471,72 @@ driver this project does not install.
 restore, enabling `LIVE_SENDING_ENABLED`/`AUTO_REPLY_ENABLED`, key changes,
 resuming a worker after a failed migration.
 
+### 9.1 PR 4 release checklist (operator observability)
+
+Nothing below has been performed. Every hosted fact is **unknown until observed**; record what you see, not what is expected.
+
+1. **Before anything:** confirm the exact CI run for the PR head (all four jobs) and read its report-only Ruff/Bandit/pip-audit output. Those three steps are **not** blocking gates.
+2. **Backup and approval** per section 5. Migration 010 is additive (two small tables, one partial index) but it is still a migration: it needs the verified backup and your explicit approval like any other.
+3. Read-only first: `scripts/migrate_release.sh --status`, then `--check-only`. Expect markers `010 worker_runtime_status table`, `010 worker_cycle_status table` and `010 ix_messages_inbound_created_at` to be **ABSENT** before the run.
+4. **Measure before you migrate -- mandatory, do not run it blindly.** The index build blocks writes to `messages` for its duration, and the PR's measurements are synthetic. Complete section 9.1.1 (size, write rate, open transactions, the callers that write `messages`, an agreed write-interruption window) and write down the numbers and the decision.
+5. Apply with the wrapper (never run `010_worker_runtime_status.py` by hand against the real database), with the worker suspended **and the API writers of `messages` handled as decided in 9.1.1**, and with **`MIGRATE_LOCK_TIMEOUT_MS=5000`** (or the value you chose) set. Without it the wrapper waits behind active writers: this was observed, not assumed (9.1.1, point 5). Expect `(12/12)`, then every marker present and valid.
+6. **Then** deploy API and worker together. Order matters for any service in `SCHEMA_INIT_MODE=verify`: it will refuse to start until 010 exists (`python scripts/migrate_preflight.py verify` shows `missing table worker_runtime_status` beforehand; this check is read-only).
+7. Set `SYSTEM_OPERATOR_API_KEY` (API service only) if it is not already set; without it the new endpoints answer `503`. Leave the four `WORKER_*`/`OPERATOR_*` settings at their defaults unless you have a reason; if you change one, change it on **both** services.
+8. Observe, and write down only what you see: `GET /system/metrics/worker` shows one `fresh` instance with role `worker` within about a minute of the worker starting; its `heartbeat_age_seconds` stays below the stale threshold; `GET /system/metrics/dispatch` returns plausible counts. **Not yet knowable from this change:** that SMTP/IMAP work from the hosted worker, that any dispatch is delivered, the hosted worker's database latency, or how a hosted restart presents.
+9. Graceful stop vs kill is demonstrated locally with real processes; on the host, a deliberate redeploy should show the old instance `stopped` and a new one `fresh`. A host-side forced kill should show `stale`. Neither has been observed on hosted infrastructure.
+
+**Rollback.** Code: redeploy the previous revision of both services; it ignores the new tables and index, so no schema action is needed (the older "verify" caveat in section 9 about 009 is unrelated to 010). Schema, only if you must: `python migrations/010_worker_runtime_status.py --downgrade` drops the two telemetry tables and the index and touches no business data. A backup restore is not needed for 010.
+
+### 9.1.1 Write-interruption assessment for the `messages` index (mandatory before step 5)
+
+A plain `CREATE INDEX` takes a `SHARE` lock on `messages`: reads continue, but every `INSERT`/`UPDATE`/`DELETE` on it waits for the whole build. Suspending the worker is **not** enough, because the HTTP API writes `messages` too. This is read from the code, not observed in production:
+
+| Writer | Entry point |
+|---|---|
+| API | `POST /webhooks/inbound-email` (stores inbound mail, may store an auto-reply), `POST /messages/{id}/approve`, `POST /integrations/leadboost/outreach-actions` |
+| Worker | generation, dispatch, follow-up engine, mailbox inbound polling, lease-recovery sweeps |
+
+`POST /integrations/leadboost/outreach-requests` writes `external_dispatches` only, and `POST /suppress` writes suppressions only; neither touches `messages`.
+
+1. **Inspect the real database** (read-only; never selects query text): `psql "$DATABASE_URL" -f scripts/migrate_010_inspect.sql`. Record the table and index size, estimated rows, the write counters (statement 2: run it twice about 60 s apart and subtract), every open transaction and its age (statement 3: anything older than the lock timeout is something the build would wait behind), the locks on `messages`, and whether the index already exists and is valid.
+2. **Measure the build on a restored backup**, not on production: restore the backup you already took, run `\timing` and `CREATE INDEX ix_messages_inbound_created_at ON messages (created_at) WHERE direction = 'inbound';` there, and note the elapsed time. Do not extrapolate from the PR's synthetic numbers (60,000 rows, 4 MB): they say nothing about your table.
+3. **Agree the write-interruption window** with the owners of the callers, and write the number down. Specifically find out, rather than assume, whether the inbound-email provider retries a webhook that times out or errors, and for how long (not knowable from this repository), and how LeadBoost's callers of `approve` / `outreach-actions` behave on a timeout.
+4. **Choose:**
+
+| Measured build time and open transactions | Action |
+|---|---|
+| Comfortably inside the agreed window, no transaction older than a few seconds | Standard path: the wrapper with `MIGRATE_LOCK_TIMEOUT_MS=5000` (migration 010 also applies its own 5 s default). Pause or drain callers if you can. |
+| Longer than the window, or long-lived transactions are present | Build the index first **by hand with `CONCURRENTLY`** (below), confirm it is valid, then run the wrapper: it sees the index and skips it. |
+| No quiet moment is available | Do not force it. The lock timeout aborts with `NOTHING was changed`; retry later. |
+
+5. **The wrapper itself contends with writers, not only step 12.** Several *existing* steps (001, 002, ...) run `CREATE INDEX IF NOT EXISTS ... ON messages(...)`, which needs the table's `SHARE` lock **even when the index already exists** (reproduced on a disposable PostgreSQL 16: with an uncommitted writer open, the real wrapper hung at step 1 of 12 until stopped, and a manual `CREATE INDEX IF NOT EXISTS` on an existing index hit `lock timeout`). So re-running the wrapper on an already-migrated database is not "free" while writers are active. This predates PR 4 and PR 4 inherits it. Guard: set `MIGRATE_LOCK_TIMEOUT_MS` (100-300000; `0` is refused) for the wrapper run; it applies PostgreSQL `lock_timeout` to every statement of every step through `PGOPTIONS`, and the same run then fails in seconds with `LockNotAvailable` and `FAILED at step N/12` instead of hanging. It is **off by default** (no behaviour change; the wrapper prints a NOTE saying so). Pooler caveat: if your `DATABASE_URL` goes through a connection pooler that rejects startup options (`unsupported startup parameter: options`), use a direct or session-mode connection for migrations or quiesce all writers; **whether your hosted pooler accepts the option is unknown until tried with `--check-only`-adjacent testing on a restored copy.** After an aborted wrapper run: steps 001-009 are idempotent and safe to re-run, `init_db()` may already have created the two empty new tables (additive and harmless), and migration 010 itself is atomic (an abort inside it changes nothing). The wrapper's "restore from the backup" hint is the generic one; a pure lock-timeout abort does not need a restore.
+6. **Why a lock timeout in migration 010 as well.** The build first has to acquire its lock. While it waits behind a long-running writer, every *new* writer queues behind it, so even a build that has not started can stall the application. With `MIGRATION_010_LOCK_TIMEOUT_MS` (default 5000, accepted range 100-300000; `0` is clamped up, never "wait forever") the migration gives up, the transaction rolls back (PostgreSQL DDL is transactional, so the two new tables are rolled back too) and the script exits non-zero. Optionally cap the build itself with `MIGRATION_010_STATEMENT_TIMEOUT_MS` (unset = no cap; a cancelled build also changes nothing). If a run aborts, look at statement 3 again and retry; do not raise the timeout to "wait it out" unless you have accepted writes queueing for that long.
+7. **Manual `CONCURRENTLY` path** (only if step 4 says so). In `psql` autocommit, never inside a transaction block, as the application's database role: `CREATE INDEX CONCURRENTLY ix_messages_inbound_created_at ON messages (created_at) WHERE direction = 'inbound';`. It does not block writes, takes longer and uses more I/O. If it is cancelled or fails it leaves an **INVALID** index: `DROP INDEX ix_messages_inbound_created_at;` and retry. The migration, `--status` and `verify` all refuse to count an invalid index as present, so a leftover cannot be mistaken for success.
+8. After the run: `--status` shows all three 010 markers present, and `python scripts/migrate_preflight.py verify` exits 0.
+
+**Unknown until observed:** the real table size and growth, the real write rate, the transactions open at migration time, how long the build takes on the real instance, whether the hosted pooler accepts `lock_timeout` as a startup option, and the webhook provider's retry behaviour. None of these are established by this change.
+
 ## 10. Evidence (what is proven, and how)
 
 Labels: `CI VERIFIED`, `LOCAL E2E VERIFIED`, `HOSTED OBSERVED`, `IMPLEMENTED, NOT HOST-VERIFIED`, `NOT VERIFIED`, `KNOWN LIMITATION`, `DEFERRED` (definitions in [FINAL_PRODUCTION_READINESS.md](FINAL_PRODUCTION_READINESS.md)). Rows that say "CI-verified", "CI-tested" or "unit-tested" below refer to the test files named in the row; they are not hosted observations.
 
 | Claim | Status |
 |---|---|
-| Canonical 11-step sequence + `init_db()` first runs cleanly on an empty PostgreSQL 16 and re-runs idempotently; guards refuse unsafe targets; 007 pre-check blocks and changes nothing | CI-verified by `tests/test_migrate_release.py` (disposable DB; required, cannot skip). Also run locally on PostgreSQL 16 |
+| Canonical 12-step sequence + `init_db()` first runs cleanly on an empty PostgreSQL 16 and re-runs idempotently; guards refuse unsafe targets; 007 pre-check blocks and changes nothing | CI-verified by `tests/test_migrate_release.py` (disposable DB; required, cannot skip). Also run locally on PostgreSQL 16 |
 | Step 001 fails on a database with no tables | Locally runtime-verified (README previously said "fresh") |
 | `create_all`-only database differs from a migrated one | Locally runtime-verified (index/column diff) |
 | Bare `postgresql://` resolves to `psycopg` (not installed) on SQLAlchemy 2.1.4, `psycopg2` on 2.0.54 | Locally runtime-verified; fixed + unit-tested |
 | `check_config.py` shape/presence checks and no-secret output | Unit-tested (`tests/test_check_config.py`) |
 | Worker SIGTERM ordered drain, `SENDING -> UNKNOWN` | Implemented; covered by existing `tests/test_external_dispatch_scheduler_shutdown.py`; **not** observed on a deployed service |
 | `/docs`, `/redoc`, `/openapi.json` return 404 by default and 200 only with `API_DOCS_ENABLED=true`; `/health` returns exactly `{"status":"ok"}` with 200 | CI-tested by `tests/test_pr2_api_surface.py` (the real app built in a fresh process). **Not** observed on a deployed service |
-| Tenant `/system/health` is organisation-scoped and has no process-wide fields; the three operator routes reject a tenant key / legacy key / missing / wrong operator key, fail closed when unset, and need no tenant key; an operator key equal to a tenant key is refused at start-up; no credential reaches responses or logs | CI-tested by `tests/test_pr3_system_operator_boundary.py` and `tests/test_c15_1_auth_fail_closed.py`; `check_config.py` handling by `tests/test_check_config.py`. **Not** observed on a deployed service, and **no operator key has been provisioned** anywhere |
+| Tenant `/system/health` is organisation-scoped and has no process-wide fields; the operator routes reject a tenant key / legacy key / missing / wrong operator key, fail closed when unset, and need no tenant key; an operator key equal to a tenant key is refused at start-up; no credential reaches responses or logs | CI-tested by `tests/test_pr3_system_operator_boundary.py` and `tests/test_c15_1_auth_fail_closed.py`; `check_config.py` handling by `tests/test_check_config.py`. **Not** observed on a deployed service, and **no operator key has been provisioned** anywhere |
 | `render.yaml` declares two services and no database; `DATABASE_URL` is `sync: false` on both; `ORG_KEY_MAP`/`SYSTEM_OPERATOR_API_KEY` are API-only secrets; no legacy `API_KEY`; docs, in-process scheduler, live sending and auto-reply pinned `false`; one worker with the shutdown drain; no secret/URL in the file | CI-tested (static, no YAML dependency) by `tests/test_render_blueprint.py` |
 | Dedicated Supabase project reachable over its session pooler; canonical 11-step wrapper run completed with expected markers on `--status` | `HOSTED OBSERVED` (operator-reported terminal observation; pooler reached from a WSL shell, not from Render) |
 | Render API `GET /health` 200; `GET /metrics` 404 (no such route exists) | `HOSTED OBSERVED` |
 | Worker running on Railway: APScheduler started; dispatch and generation jobs executed | `HOSTED OBSERVED` (worker logs) |
 | A concurrent first `init_db()` start produced a duplicate-sequence error once; a later start recovered | `HOSTED OBSERVED`; fixed in code with a regression test (`LOCAL VERIFIED`); hosted re-observation pending |
 | Outbound SMTP from the Railway worker (Limited Trial caveat) | `NOT VERIFIED` |
-| Backups/recovery of the Supabase project, Render-to-Supabase connection type, deployed HTTPS behavior of fail-closed auth, `/docs` exposure, worker liveness signal, live key agreement between LeadBoost and Mailer, removal of the redundant Railway `web` service | `NOT VERIFIED` (dashboard-only facts; no evidence recorded) |
+| Backups/recovery of the Supabase project, Render-to-Supabase connection type, deployed HTTPS behavior of fail-closed auth, `/docs` exposure, **hosted** worker liveness signal (PR 4 implements it; not yet observed on the hosted worker), live key agreement between LeadBoost and Mailer, removal of the redundant Railway `web` service | `NOT VERIFIED` (dashboard-only facts; no evidence recorded) |
 | A deployed request through to a received message (hosted end-to-end delivery) | `NOT VERIFIED` (controlled acceptance not performed) |
 
 Deferred: C14 -- deployed HTTPS/worker E2E with disposable SMTP/IMAP. C15 -- deployed

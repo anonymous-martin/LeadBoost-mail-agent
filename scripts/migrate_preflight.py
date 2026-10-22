@@ -243,6 +243,16 @@ def _markers(conn):
             or any(u["name"] == name for u in insp.get_unique_constraints(table))
         )
 
+    def idx_valid(name):
+        """PostgreSQL: an INVALID index (e.g. a cancelled CREATE INDEX CONCURRENTLY) is not 'present'."""
+        if conn.dialect.name != "postgresql":
+            return True
+        from sqlalchemy import text
+
+        return bool(conn.execute(
+            text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:n)"), {"n": name}
+        ).scalar())
+
     def nullable(table, name):
         if table not in tables:
             return False
@@ -275,6 +285,10 @@ def _markers(conn):
             "009  partial unique indexes (replace the global 003 constraint)",
             idx("messages", "uq_messages_message_id_no_mailbox") and idx("messages", "uq_messages_mailbox_message_id"),
         ),
+        ("010  worker_runtime_status table", "worker_runtime_status" in tables),
+        ("010  worker_cycle_status table", "worker_cycle_status" in tables),
+        ("010  ix_messages_inbound_created_at (partial index, operator inbound metrics; must be VALID)",
+         idx("messages", "ix_messages_inbound_created_at") and idx_valid("ix_messages_inbound_created_at")),
     ]
 
 

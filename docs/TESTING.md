@@ -57,6 +57,14 @@ REQUIRE_SCHEMA_INIT_PG=1 python -m pytest -o addopts="" tests/test_schema_init.p
 
 `REQUIRE_SCHEMA_INIT_PG=1` turns an unreachable database into a failure instead of a skip. The always-run SQLite half of this file (modes, no-DDL guarantee, lifespan and worker wiring) is part of the ordinary deterministic suite.
 
+**Operator observability (PR 4)** -- migration 010 on a fresh and an already-migrated disposable database, idempotency, read-only verify, downgrade touching no business data, aggregate semantics on real `timestamptz`/`timestamp` columns, agreement with the real lease-recovery sweep, concurrent heartbeat writers, the `EXPLAIN` plans behind the index review, fail-fast behaviour against a real uncommitted writer (lock timeout, nothing changed), INVALID-index refusal, the manual `CONCURRENTLY` path, the read-only inspection script, and real unique-violation races on the heartbeat insert (the test creates and drops its own `mailer_migrate_test_pr4_*` databases):
+
+```bash
+REQUIRE_PR4_OBSERVABILITY_PG=1 python -m pytest -o addopts="" tests/test_pr4_observability_postgres.py -v
+```
+
+`REQUIRE_PR4_OBSERVABILITY_PG=1` turns an unreachable database into a failure instead of a skip. The deterministic PR 4 files (`test_pr4_dispatch_metrics.py`, `test_pr4_worker_status.py`, `test_pr4_cycle_instrumentation.py`, `test_pr4_inbound_metrics.py`) need no database server and run in the ordinary suite; `test_pr4_cycle_instrumentation.py` starts two real `worker.py` processes (graceful stop vs `SIGKILL`) and takes about 15 seconds.
+
 **Local SMTP protocol integration:**
 
 ```bash
@@ -88,8 +96,9 @@ Files under `tests/evaluation/test_live_*.py` and `tests/test_semantic_regressio
 |---|---|
 | Dispatch state machine, claims, recovery | `test_external_dispatch_claiming.py`, `test_dispatch_recovery_semantics.py`, `test_external_dispatch_crash_matrix.py`, `test_external_dispatch_worker.py`, `test_external_dispatch_postgres.py` |
 | Worker shutdown | `test_external_dispatch_scheduler_shutdown.py` |
+| Operator observability: dispatch aggregates, worker heartbeat (fresh/stale/stopped), cycle outcomes, inbound tallies, migration 010 | `test_pr4_dispatch_metrics.py`, `test_pr4_worker_status.py`, `test_pr4_cycle_instrumentation.py`, `test_pr4_inbound_metrics.py`, `test_pr4_observability_postgres.py` |
 | Idempotency | `test_leadboost_integration.py`, `test_leadboost_generated_outreach.py`, `test_leadboost_generated_outreach_postgres.py` |
-| Tenant boundaries | `test_leadboost_native_isolation.py`, `test_c15_1_auth_fail_closed.py`, `test_pr2_key_map_collisions.py`, `test_c15_1b_webhook_tenant_scope.py`, `test_tenant_correlation.py`, `test_pr3_system_operator_boundary.py` |
+| Tenant boundaries | `test_leadboost_native_isolation.py`, `test_c15_1_auth_fail_closed.py`, `test_pr2_key_map_collisions.py`, `test_c15_1b_webhook_tenant_scope.py`, `test_tenant_correlation.py`, `test_pr3_system_operator_boundary.py` (also the operator-route inventory and auth matrix for the PR 4 endpoints) |
 | Mailbox API and encryption (deterministic, run by CI) | `test_mailbox_foundation.py`, `test_l1_mailbox_transport_update.py` |
 | Mailbox persistence and encryption on PostgreSQL (**not run by any CI job**) | `test_mailbox_postgres.py` |
 | SMTP outcomes | `test_smtp_local_integration.py`, `test_smtp_explicit_refusals_not_retried.py`, `test_sender_message_id.py`, `test_sender_quit_containment.py`, `test_sender_cleanup_precedence.py` |
@@ -103,7 +112,7 @@ Files under `tests/evaluation/test_live_*.py` and `tests/test_semantic_regressio
 `.github/workflows/ci.yml` runs on pushes to `main` and `grounding-state-fix` and on pull requests to `main`, with four jobs:
 
 1. **Quality and deterministic tests**: `compileall`, report-only ruff, `pip check`, report-only `pip-audit` and `bandit`, then `python -m pytest -q --cov=mailer_agent` with coverage and JUnit artifacts.
-2. **PostgreSQL integration** (PostgreSQL 16 service): the six files above, then the migration wrapper test with `REQUIRE_MIGRATION_WRAPPER_PG=1`.
+2. **PostgreSQL integration** (PostgreSQL 16 service): the six files above, then the migration wrapper test with `REQUIRE_MIGRATION_WRAPPER_PG=1`, the schema-init test with `REQUIRE_SCHEMA_INIT_PG=1`, and the PR 4 observability test with `REQUIRE_PR4_OBSERVABILITY_PG=1`.
 3. **Local SMTP protocol integration**.
 4. **M3 real IMAP end-to-end and C12 full chain**: installs Dovecot, then runs the two files with PostgreSQL and `C12_ALLOW_DESTRUCTIVE_TEST_DB=1`.
 

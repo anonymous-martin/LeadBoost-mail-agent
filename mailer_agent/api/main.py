@@ -19,7 +19,16 @@ from mailer_agent.api import (
 from mailer_agent.api.deps import validate_auth_configuration
 from mailer_agent.config import get_settings
 from mailer_agent.db import prepare_schema
-from mailer_agent.followup.scheduler import start_scheduler, stop_scheduler
+from mailer_agent.followup.scheduler import (
+    mark_runtime_stopped,
+    start_scheduler,
+    stop_scheduler,
+)
+from mailer_agent.mail.external_dispatch_worker import (
+    begin_external_dispatch_shutdown,
+    drain_external_dispatches_on_shutdown,
+)
+from mailer_agent.worker_status import ROLE_API_EMBEDDED
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("mailer_agent")
@@ -43,7 +52,7 @@ async def lifespan(app: FastAPI):
             "Messages will be generated and logged but NOT actually emailed."
         )
     if settings.run_scheduler_in_process:
-        start_scheduler()
+        start_scheduler(role=ROLE_API_EMBEDDED)
     else:
         logger.info(
             "RUN_SCHEDULER_IN_PROCESS=false -- this process will only serve the API. "
@@ -51,9 +60,54 @@ async def lifespan(app: FastAPI):
             "or scheduled sends/replies will never be picked up."
         )
     yield
-    if settings.run_scheduler_in_process:
-        stop_scheduler()
 
+    if settings.run_scheduler_in_process:
+        shutdown_ready = True
+
+        try:
+            begin_external_dispatch_shutdown()
+        except Exception as exc:  # noqa: BLE001
+            shutdown_ready = False
+            logger.warning(
+                "Could not stop embedded external-dispatch claiming: %s", exc
+            )
+
+        try:
+            stop_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            shutdown_ready = False
+            logger.warning("Could not stop embedded scheduler cleanly: %s", exc)
+
+        drain_report = None
+        try:
+            drain_report = drain_external_dispatches_on_shutdown()
+            if not drain_report.drained:
+                shutdown_ready = False
+            if drain_report.abandoned_unknown or not drain_report.drained:
+                logger.warning(
+                    "Embedded external-dispatch shutdown: drained=%s "
+                    "resolved_to_unknown=%s not_owned=%s",
+                    drain_report.drained,
+                    list(drain_report.abandoned_unknown),
+                    list(drain_report.still_owned_elsewhere),
+                )
+        except Exception as exc:  # noqa: BLE001
+            shutdown_ready = False
+            logger.warning(
+                "Embedded external-dispatch drain failed; heartbeat will age stale: %s",
+                exc,
+            )
+
+        if shutdown_ready and drain_report is not None and drain_report.drained:
+            try:
+                mark_runtime_stopped()
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not mark embedded runtime stopped")
+        else:
+            logger.warning(
+                "Embedded runtime not marked stopped because shutdown/drain was "
+                "incomplete; heartbeat will age into stale"
+            )
 
 app = FastAPI(
     title="Mailer Agent",

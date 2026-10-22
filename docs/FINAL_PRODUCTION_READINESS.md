@@ -87,7 +87,7 @@ The classes are never merged. In particular, a passing test is not a hosted obse
 
 ## 7. Deferred
 
-IMAP cursor, an orphan inbound table, webhook `To:` correlation, native auto-reply transaction redesign, automated migrations, worker liveness signal, per-organization sender identity, rate limits, key rotation tooling, and an `UNKNOWN` remedy policy.
+IMAP cursor, an orphan inbound table, webhook `To:` correlation, native auto-reply transaction redesign, automated migrations, hosted verification of the worker liveness signal (the signal itself is implemented in PR 4, `IMPLEMENTED, NOT HOST-VERIFIED`; see [operator observability](OPERATOR_OBSERVABILITY.md)), per-organization sender identity, rate limits, key rotation tooling, and an `UNKNOWN` remedy policy.
 
 ## 8. Contradictions found in this documentation pass
 

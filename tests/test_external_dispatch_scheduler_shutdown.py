@@ -358,3 +358,208 @@ def test_real_worker_process_runs_graceful_shutdown_on_sigterm(tmp_path):
     assert "Shutting down background worker" in text, text
     assert "external_dispatch: shutdown requested" in text, text
     assert text.index("shutdown requested") < text.index("Scheduler stopped"), text
+
+
+
+# PR4 shutdown liveness regression tests
+def test_shutdown_marks_stopped_only_after_successful_drain(monkeypatch):
+    order = []
+    monkeypatch.setattr(
+        worker_mod, "begin_external_dispatch_shutdown",
+        lambda: order.append("stop_claiming"),
+    )
+    monkeypatch.setattr(
+        worker_mod, "stop_scheduler",
+        lambda: order.append("stop_scheduler"),
+    )
+    monkeypatch.setattr(
+        worker_mod, "drain_external_dispatches_on_shutdown",
+        lambda: order.append("drain") or w.ShutdownReport(True, (), ()),
+    )
+
+    class _Scope:
+        def __enter__(self):
+            order.append("release_claims")
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(worker_mod, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(worker_mod, "release_all_claims", lambda db, wid: 0)
+    monkeypatch.setattr(
+        worker_mod, "mark_runtime_stopped",
+        lambda: order.append("mark_stopped"),
+    )
+
+    worker_mod.graceful_shutdown("w-1")
+
+    assert order == [
+        "stop_claiming", "stop_scheduler", "drain",
+        "release_claims", "mark_stopped",
+    ]
+
+
+def test_shutdown_timeout_does_not_mark_worker_stopped(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(worker_mod, "begin_external_dispatch_shutdown", lambda: None)
+    monkeypatch.setattr(worker_mod, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(
+        worker_mod, "drain_external_dispatches_on_shutdown",
+        lambda: w.ShutdownReport(False, (123,), ()),
+    )
+
+    class _Scope:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(worker_mod, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(worker_mod, "release_all_claims", lambda db, wid: 0)
+    monkeypatch.setattr(
+        worker_mod, "mark_runtime_stopped", lambda: stopped.append(True)
+    )
+
+    worker_mod.graceful_shutdown("w-1")
+
+    assert stopped == []
+
+
+def test_shutdown_drain_exception_does_not_mark_worker_stopped(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(worker_mod, "begin_external_dispatch_shutdown", lambda: None)
+    monkeypatch.setattr(worker_mod, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(
+        worker_mod, "drain_external_dispatches_on_shutdown",
+        lambda: (_ for _ in ()).throw(RuntimeError("simulated drain failure")),
+    )
+
+    class _Scope:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(worker_mod, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(worker_mod, "release_all_claims", lambda db, wid: 0)
+    monkeypatch.setattr(
+        worker_mod, "mark_runtime_stopped", lambda: stopped.append(True)
+    )
+
+    worker_mod.graceful_shutdown("w-1")
+
+    assert stopped == []
+
+
+def test_dispatch_runtime_resumes_only_when_idle():
+    runtime = w.DispatchRuntime()
+    w.begin_external_dispatch_shutdown(runtime)
+
+    assert runtime.stopping is True
+    assert runtime.resume_if_idle() is True
+    assert runtime.stopping is False
+    assert runtime.inflight() == []
+
+
+def test_dispatch_runtime_does_not_discard_inflight_work_on_resume():
+    runtime = w.DispatchRuntime()
+    claim = ClaimedDispatch(999001, "org-test", "worker-test", age(5))
+    runtime.register(claim)
+    w.begin_external_dispatch_shutdown(runtime)
+
+    assert runtime.resume_if_idle() is False
+    assert runtime.stopping is True
+    assert runtime.inflight() == [claim]
+
+
+def test_start_scheduler_resumes_idle_runtime(monkeypatch):
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    runtime = w.DispatchRuntime()
+    w.begin_external_dispatch_shutdown(runtime)
+
+    # Isolate the singleton so this test cannot affect other tests.
+    monkeypatch.setattr(w, "default_runtime", runtime)
+    monkeypatch.setattr(BackgroundScheduler, "start", lambda self, *a, **k: None)
+    monkeypatch.setattr(sched, "_scheduler", None)
+    monkeypatch.setattr(sched, "_runtime_recorder", None)
+
+    started = sched.start_scheduler()
+
+    assert started is sched._scheduler
+    assert runtime.stopping is False
+
+    # BackgroundScheduler.start was stubbed, so no scheduler thread was created.
+    sched._scheduler = None
+    sched._runtime_recorder = None
+
+
+def test_start_scheduler_refuses_runtime_with_inflight_work(monkeypatch):
+    runtime = w.DispatchRuntime()
+    claim = ClaimedDispatch(999002, "org-test", "worker-test", age(5))
+    runtime.register(claim)
+    w.begin_external_dispatch_shutdown(runtime)
+
+    monkeypatch.setattr(w, "default_runtime", runtime)
+    monkeypatch.setattr(sched, "_scheduler", None)
+    monkeypatch.setattr(sched, "_runtime_recorder", None)
+
+    with pytest.raises(RuntimeError, match="remain in flight"):
+        sched.start_scheduler()
+
+    assert runtime.stopping is True
+    assert runtime.inflight() == [claim]
+
+def test_shutdown_drain_waits_for_claim_attempt_before_registration(
+    factory, monkeypatch
+):
+    import threading
+
+    claim_entered = threading.Event()
+    release_claim = threading.Event()
+    thread_errors = []
+    runtime = w.DispatchRuntime()
+
+    def paused_claim(db, worker_id):
+        claim_entered.set()
+        if not release_claim.wait(timeout=5):
+            raise AssertionError("Timed out waiting to release simulated claim")
+        return None
+
+    monkeypatch.setattr(w, "claim_next_external_dispatch", paused_claim)
+
+    def run_claim():
+        try:
+            w.process_next_external_dispatch(
+                session_factory=factory,
+                worker_id="w-claim-attempt",
+                runtime=runtime,
+            )
+        except BaseException as exc:
+            thread_errors.append(exc)
+
+    thread = threading.Thread(target=run_claim, daemon=True)
+    thread.start()
+
+    try:
+        assert claim_entered.wait(timeout=5)
+        w.begin_external_dispatch_shutdown(runtime)
+
+        report = w.drain_external_dispatches_on_shutdown(
+            session_factory=factory,
+            runtime=runtime,
+            drain_seconds=0,
+        )
+
+        assert report.drained is False
+        assert runtime.resume_if_idle() is False
+    finally:
+        release_claim.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert thread_errors == []
+    assert runtime.resume_if_idle() is True

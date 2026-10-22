@@ -28,6 +28,7 @@ Start with the [project README](../README.md) for the 20-second overview. This i
 | Document | Read it to |
 |---|---|
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Understand reference versus observed topology, CI and mirroring, release sequence, rollback principles and the full configuration table. |
+| [OPERATOR_OBSERVABILITY.md](OPERATOR_OBSERVABILITY.md) | Read the three operator-only metrics endpoints (dispatch, worker heartbeat, inbound) correctly: what each number means and does not mean, thresholds, retention, privacy and the query/index review. |
 | [C13_DEPLOYMENT_RUNBOOK.md](C13_DEPLOYMENT_RUNBOOK.md) | Follow the detailed first-deployment and steady-state procedures, including pause/resume, `UNKNOWN` handling and which steps have actually been performed. |
 
 ## Test and validate
