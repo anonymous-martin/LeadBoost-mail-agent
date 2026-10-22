@@ -51,8 +51,9 @@ services:
                               # only. REQUIRED: with no key the API refuses to start. Never commit values.
                               # The legacy global API_KEY is intentionally NOT declared in this profile.
       - key: SYSTEM_OPERATOR_API_KEY
-        sync: false           # Operator-only credential for /system/config, /system/metrics/llm and
-                              # /system/integration/validate (X-System-Operator-Key). API service ONLY.
+        sync: false           # Operator-only credential for /system/config, /system/metrics/llm,
+                              # /system/integration/validate and /system/metrics/{dispatch,worker,inbound}
+                              # (X-System-Operator-Key). API service ONLY.
                               # Must differ from every tenant key or the API refuses to start.
       - key: LEADBOOST_INTEGRATION_SENDER_EMAIL
         sync: false           # REQUIRED for LeadBoost generated outreach: the first dispatch per organization

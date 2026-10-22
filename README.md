@@ -121,7 +121,7 @@ Tenant keys, the operator key and the mailbox-encryption key are three different
 | State plus conversation | `GET /integrations/leadboost/outreach-actions/{idempotency_key}/conversation` | tenant key |
 | Inbound email webhook | `POST /webhooks/inbound-email` | tenant key |
 | Organization-scoped diagnostics (database-backed) | `GET /system/health`, `/system/metrics/classification`, `/system/metrics/states` | tenant key |
-| Operator diagnostics | `GET /system/config`, `/system/metrics/llm`, `/system/integration/validate` | `X-System-Operator-Key` |
+| Operator diagnostics | `GET /system/config`, `/system/metrics/llm`, `/system/integration/validate`, `/system/metrics/dispatch`, `/system/metrics/worker`, `/system/metrics/inbound` (see [operator observability](docs/OPERATOR_OBSERVABILITY.md)) | `X-System-Operator-Key` |
 
 Mailer is called server-to-server. Mailer keys, database URLs, mailbox passwords and the key mapping must never enter a frontend bundle or a `NEXT_PUBLIC_*` variable. Details: [docs/API_AND_INTEGRATION.md](docs/API_AND_INTEGRATION.md).
 

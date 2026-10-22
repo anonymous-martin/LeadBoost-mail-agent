@@ -167,6 +167,18 @@ jobs:
         run: |
           python -m pytest -o addopts="" tests/test_schema_init.py -v
 
+      # PR4 operator observability: migration 010 on a fresh and an already-migrated disposable database,
+      # idempotency, read-only verify, downgrade touching no business data, aggregate semantics on real
+      # timestamptz/timestamp columns, the recovery-sweep cross-check, and the EXPLAIN plans behind the
+      # index review. REQUIRE_PR4_OBSERVABILITY_PG=1 turns a missing/unreachable PostgreSQL into a hard
+      # FAILURE, never a skip.
+      - name: Operator observability against disposable PostgreSQL
+        env:
+          POSTGRES_TEST_URL: postgresql+psycopg2://mailer_agent:mailer_agent_test_pw@localhost:5432/mailer_agent_test
+          REQUIRE_PR4_OBSERVABILITY_PG: "1"
+        run: |
+          python -m pytest -o addopts="" tests/test_pr4_observability_postgres.py -v
+
   local-smtp:
     name: Local SMTP protocol integration
     runs-on: ubuntu-24.04

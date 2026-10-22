@@ -15,7 +15,8 @@ Access model (PR3). Two routers, each route explicitly in exactly one:
   /system/metrics/states. Authenticated with a tenant key (X-API-Key) and scoped to that
   key's organization. They return no process-wide data.
 * OPERATOR routes (``operator_router``): /system/integration/validate, /system/metrics/llm,
-  /system/config. They report process-wide booleans/counters/configuration (is this
+  /system/config, and (PR4) /system/metrics/dispatch, /system/metrics/worker,
+  /system/metrics/inbound. They report process-wide booleans/counters/configuration (is this
   deployment wired up, provider retry stats, API-process settings) -- not any tenant's data --
   so they are intentionally unscoped, and therefore are NOT reachable with a tenant key. They
   require the separate operator credential (X-System-Operator-Key, SYSTEM_OPERATOR_API_KEY; see
@@ -28,7 +29,7 @@ the two on purpose (tests/test_pr3_system_operator_boundary.py pins the inventor
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
@@ -37,6 +38,8 @@ from mailer_agent.config import get_settings
 from mailer_agent.db import get_db
 from mailer_agent.integration import mailer_agent
 from mailer_agent.models import Campaign, Contact, ContactStatus, Message, MessageDirection, MessageStatus
+from mailer_agent.operator_metrics import dispatch_metrics, inbound_metrics, worker_metrics
+from mailer_agent.utils.datetime_utils import utcnow
 
 tenant_router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(require_api_key)])
 operator_router = APIRouter(
@@ -56,7 +59,7 @@ def get_system_health(
     success rate. All counts are computed with a single grouped SQL query each,
     scoped to org_id. Process-wide data (LLM provider metrics, API-process
     settings) is deliberately NOT part of this response: it is available to the
-    operator only, via /system/metrics/llm and /system/config.
+    operator only, via /system/metrics/llm, /system/config and the PR4 /system/metrics/{dispatch,worker,inbound}.
     """
     # --- Contact state distribution: one GROUP BY, not one query per enum ---
     state_rows = (
@@ -246,6 +249,53 @@ def get_system_config():
         "run_scheduler_in_process": settings.run_scheduler_in_process,
         "database_type": "postgresql" if "postgresql" in settings.database_url else "sqlite",
     }
+
+
+# --------------------------------------------------------------------------- PR4: operator observability
+# Read-only, process-wide, operator-credential only (router-level require_system_operator). They sit on
+# operator_router and NOT on tenant_router, and they are deliberately not folded into /system/health,
+# /system/metrics/states or /system/metrics/classification, which are tenant-scoped. See
+# mailer_agent/operator_metrics.py for exactly what each number means and what it does not.
+
+
+@operator_router.get("/metrics/dispatch")
+def get_dispatch_metrics(db: Session = Depends(get_db)):
+    """Durable ExternalDispatch counts by state, queue depth/age, stale `sending`, `unknown` outcomes.
+
+    Process-wide across all organizations. `sent` means SMTP ACCEPTED, not recipient delivery.
+    """
+    return dispatch_metrics(db, now=utcnow(), lease_seconds=get_settings().external_dispatch_lease_seconds)
+
+
+@operator_router.get("/metrics/worker")
+def get_worker_metrics(db: Session = Depends(get_db)):
+    """Heartbeat freshness (fresh / stale / stopped) per scheduler process, plus each process's latest
+    cycle outcomes. A fresh heartbeat is process liveness only -- not SMTP delivery, not job health."""
+    cfg = get_settings()
+    return worker_metrics(
+        db,
+        now=utcnow(),
+        stale_after_seconds=cfg.worker_stale_after_seconds,
+        heartbeat_interval_seconds=cfg.worker_heartbeat_interval_seconds,
+        retention_hours=cfg.worker_runtime_retention_hours,
+    )
+
+
+@operator_router.get("/metrics/inbound")
+def get_inbound_metrics(
+    window_hours: int | None = Query(default=None, ge=1, le=168, description="Look-back for persisted inbound rows."),
+    db: Session = Depends(get_db),
+):
+    """Mailbox-poll cycle evidence, the legacy global-IMAP path (reported separately), and a windowed
+    count of PERSISTED inbound messages. Unmatched/ambiguous mail is not stored as a Message, so the
+    persisted count is not 'emails received'."""
+    cfg = get_settings()
+    return inbound_metrics(
+        db,
+        now=utcnow(),
+        window_hours=window_hours if window_hours is not None else cfg.operator_inbound_window_hours,
+        stale_after_seconds=cfg.worker_stale_after_seconds,
+    )
 
 
 # What main.py includes. Built LAST on purpose: include_router copies the routes registered on a router

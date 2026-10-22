@@ -355,6 +355,17 @@ class Message(Base):
             postgresql_where=text("mailbox_id IS NOT NULL"),
             sqlite_where=text("mailbox_id IS NOT NULL"),
         ),
+        # PR4: serves ONE query -- the operator-only inbound aggregate over a recent window
+        # (mailer_agent/operator_metrics.py::inbound_metrics: WHERE direction = 'inbound' AND
+        # created_at >= :since). Partial on inbound rows so it stays small (outbound rows, the
+        # majority, are never indexed) and adds a write only to inbound inserts. Not unique and
+        # not used by any request path. Created for existing databases by migration 010.
+        Index(
+            "ix_messages_inbound_created_at",
+            "created_at",
+            postgresql_where=text("direction = 'inbound'"),
+            sqlite_where=text("direction = 'inbound'"),
+        ),
     )
 
 
@@ -762,3 +773,63 @@ class Mailbox(Base):
 
     def __repr__(self) -> str:
         return f"<Mailbox {self.public_reference}>"
+
+
+# ---------------------------------------------------------------------------
+# PR4: worker runtime status (operator observability)
+# ---------------------------------------------------------------------------
+# Two deliberately small tables. They exist because the HTTP API and the scheduler
+# (worker.py) are separate processes: nothing in-process in the worker can be read by the API,
+# and no existing table records "this process is alive" (Contact / ExternalDispatch
+# claimed_by/claimed_at exist only while work is claimed, and say nothing about an idle worker).
+#
+# They hold NO business data: no tenant, contact, address, Message-ID, idempotency key,
+# message content, credential or exception text -- only an opaque random process id, a role,
+# timestamps, fixed outcome labels and whitelisted integer counters
+# (mailer_agent/worker_status.py enforces the whitelist at write time).
+#
+# Growth is bounded: one row per scheduler PROCESS (a new random id each start) and at most
+# one row per (process, job kind). Rows of processes whose last heartbeat is older than
+# WORKER_RUNTIME_RETENTION_HOURS are deleted by a running scheduler process. There is no
+# event log.
+
+class WorkerRuntimeStatus(Base):
+    """One scheduler-bearing process (worker.py, or an API with an in-process scheduler)."""
+
+    __tablename__ = "worker_runtime_status"
+    __table_args__ = (
+        # The process identity. Random per start, so two workers on one host -- or two with
+        # the same WORKER_ID -- are still two rows.
+        UniqueConstraint("instance_id", name="uq_worker_runtime_status_instance_id"),
+        # Retention sweep and the operator listing both order/filter by recency.
+        Index("ix_worker_runtime_status_heartbeat_at", "heartbeat_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    instance_id = Column(String(64), nullable=False)      # uuid4 hex; never a hostname or WORKER_ID
+    role = Column(String(32), nullable=False)             # "worker" | "api_embedded" | "scheduler"
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=False)
+    stopped_at = Column(DateTime(timezone=True), nullable=True)   # set only by a graceful stop
+
+
+class WorkerCycleStatus(Base):
+    """Latest outcome of one scheduled job kind, for one process. Overwritten, never appended."""
+
+    __tablename__ = "worker_cycle_status"
+    __table_args__ = (
+        UniqueConstraint("instance_id", "kind", name="uq_worker_cycle_status_instance_kind"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    instance_id = Column(String(64), nullable=False)      # matches WorkerRuntimeStatus.instance_id
+    kind = Column(String(32), nullable=False)             # fixed vocabulary, see worker_status.CYCLE_KINDS
+    last_cycle_at = Column(DateTime(timezone=True), nullable=False)
+    # completed | degraded | failed -- see worker_status for exactly what each one asserts.
+    last_outcome = Column(String(16), nullable=False)
+    last_completed_at = Column(DateTime(timezone=True), nullable=True)
+    consecutive_unhealthy_cycles = Column(Integer, nullable=False, default=0)
+    cycles_recorded = Column(Integer, nullable=False, default=0)
+    last_error_type = Column(String(64), nullable=True)   # exception CLASS name only, never its text
+    last_counts = Column(JSON, nullable=True)             # whitelisted ints, last cycle
+    total_counts = Column(JSON, nullable=True)            # whitelisted ints, since this process started

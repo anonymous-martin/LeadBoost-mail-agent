@@ -200,11 +200,16 @@ def test_full_canonical_sequence_on_empty_database_then_idempotent_rerun(disposa
 
     first = disposable_db.run()
     assert first.returncode == 0, _out(first)
-    assert "(11/11) migrations/009_messages_mailbox_scoped_dedupe.py" in _out(first)
+    assert "(11/12) migrations/009_messages_mailbox_scoped_dedupe.py" in _out(first)
+    assert "(12/12) migrations/010_worker_runtime_status.py" in _out(first)
     assert "ABSENT" not in _out(first), "every schema marker must be present after the run"
 
     tables = disposable_db.tables()
     assert {"campaigns", "contacts", "messages", "external_dispatches", "mailboxes"} <= tables
+    # PR4: operator observability tables and the 010 markers
+    assert {"worker_runtime_status", "worker_cycle_status"} <= tables
+    assert "010  worker_runtime_status table" in _out(first)
+    assert "ix_messages_inbound_created_at" in _out(first)
     with disposable_db.engine.connect() as c:
         names = {i["name"] for i in inspect(c).get_indexes("messages")}
         names |= {u["name"] for u in inspect(c).get_unique_constraints("messages")}

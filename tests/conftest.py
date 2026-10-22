@@ -5,6 +5,7 @@ Pytest configuration and shared fixtures.
 import pytest
 
 from tests.fake_llm_provider import FakeLLMProvider, install_fake_llm_provider
+from tests.pr4_support import operator_env  # noqa: F401  (PR4 fixture, shared by tests/test_pr4_*.py)
 
 
 @pytest.fixture(autouse=True)
@@ -85,3 +86,17 @@ def use_real_llm(monkeypatch):
     """
     # Don't patch anything - use real implementation
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_worker_runtime_recorder():
+    """PR4: ``scheduler._runtime_recorder`` is process-global state created by ``start_scheduler()``.
+    Some tests start a (stubbed) scheduler without ever stopping it; without this reset the recorder
+    would leak into later tests that call job functions directly and make them write liveness rows
+    to whatever the default database is. Resets only if the scheduler module was imported at all."""
+    yield
+    import sys
+
+    scheduler = sys.modules.get("mailer_agent.followup.scheduler")
+    if scheduler is not None:
+        scheduler._runtime_recorder = None

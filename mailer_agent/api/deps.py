@@ -60,7 +60,8 @@ that is safe on a given deployment is a deployment fact this repository cannot s
 
 OPERATOR BOUNDARY (PR3)
 -----------------------
-Process-wide diagnostics (/system/config, /system/metrics/llm, /system/integration/validate) are not
+Process-wide diagnostics (/system/config, /system/metrics/llm, /system/integration/validate and the PR4
+/system/metrics/{dispatch,worker,inbound} aggregates) are not
 tenant data, so a tenant key must not open them. They use a separate credential,
 SYSTEM_OPERATOR_API_KEY, sent as `X-System-Operator-Key` (require_system_operator below):
 

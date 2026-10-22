@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     # (they sit outside the authenticated routers). Read once at API start-up; the worker ignores it.
     api_docs_enabled: bool = False
     # PR3: credential for the PROCESS-WIDE operator routes (/system/config, /system/metrics/llm,
-    # /system/integration/validate), presented as the `X-System-Operator-Key` header. It is NOT a
+    # /system/integration/validate and, from PR4, /system/metrics/{dispatch,worker,inbound}), presented as the `X-System-Operator-Key` header. It is NOT a
     # tenant key: no value of API_KEY / ORG_KEY_MAP / ORG_KEYS_* grants operator access, and the API
     # refuses to start if this value equals one of them. Empty (the default) means the operator routes
     # answer 503 for everyone (fail closed). API service only -- the worker never reads it. Never log it.
@@ -244,6 +244,23 @@ class Settings(BaseSettings):
     # finish before marking the ones it still owns UNKNOWN. Keep it under
     # the platform's shutdown grace period.
     external_dispatch_shutdown_drain_seconds: float = 25.0
+
+    # --- PR4: operator observability (worker liveness) -------------------------
+    # Every process that runs the scheduler (worker.py, or an API with
+    # RUN_SCHEDULER_IN_PROCESS=true) writes a heartbeat row on this cadence. The
+    # operator endpoint reports a process as "stale" once its last heartbeat is
+    # older than worker_stale_after_seconds. Keep stale_after at roughly 4x the
+    # interval so one slow or missed write (a busy database, a GC pause) does not
+    # flap the status. A heartbeat shows the process is alive and its scheduler is
+    # ticking -- NOT that SMTP/IMAP/LLM calls work.
+    worker_heartbeat_interval_seconds: int = 30
+    worker_stale_after_seconds: int = 120
+    # Rows for processes whose last heartbeat is older than this are deleted by a
+    # running scheduler process (at start-up, then at most hourly). A process that
+    # died without cleanup stays visible as "stale" until then.
+    worker_runtime_retention_hours: int = 72
+    # Default look-back for the persisted-inbound aggregate on /system/metrics/inbound.
+    operator_inbound_window_hours: int = 24
 
     @property
     def llm_fallback_models_list(self) -> list[str]:

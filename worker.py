@@ -60,7 +60,10 @@ LeadBoost ExternalDispatch shutdown ordering (``graceful_shutdown``):
   4. dispatches THIS process still owns after the drain deadline are moved
      SENDING -> UNKNOWN, by dispatch ID + claim token (never by worker_id
      alone, never to QUEUED -- an interrupted send cannot be assumed unsent);
-  5. release Contact claims as before.
+  5. release Contact claims as before;
+  6. (PR4) mark this process's liveness row stopped -- last, so "stopped" is never shown while a
+     send is still in flight. A process killed without cleanup never reaches this step and its
+     heartbeat simply ages into "stale" on the operator worker metrics.
 """
 
 import logging
@@ -69,12 +72,17 @@ import signal
 import time
 
 from mailer_agent.db import prepare_schema, session_scope
-from mailer_agent.followup.scheduler import start_scheduler, stop_scheduler
+from mailer_agent.followup.scheduler import (
+    mark_runtime_stopped,
+    start_scheduler,
+    stop_scheduler,
+)
 from mailer_agent.followup.work_claiming import make_worker_id, release_all_claims
 from mailer_agent.mail.external_dispatch_worker import (
     begin_external_dispatch_shutdown,
     drain_external_dispatches_on_shutdown,
 )
+from mailer_agent.worker_status import ROLE_WORKER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("mailer_agent.worker")
@@ -133,6 +141,14 @@ def graceful_shutdown(worker_id: str) -> None:
     except Exception as exc:  # noqa: BLE001 — best-effort, don't mask shutdown
         logger.warning("Could not release claims on shutdown: %s", exc)
 
+    # 6. PR4: mark this process's liveness row stopped -- LAST, after in-flight sends have drained
+    # and claims are released, so "stopped" is never shown while work is still in flight. Best-effort:
+    # if the database is unreachable the heartbeat simply ages into "stale"; nothing else changes.
+    try:
+        mark_runtime_stopped()
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not mark worker runtime stopped")
+
 
 if __name__ == "__main__":
     prepare_schema()
@@ -152,7 +168,7 @@ if __name__ == "__main__":
     # right after the scheduler starts (before the loop below) would otherwise
     # raise SystemExit outside the handler and skip graceful_shutdown().
     try:
-        scheduler = start_scheduler()
+        scheduler = start_scheduler(role=ROLE_WORKER)
         while True:
             time.sleep(60)
     except (KeyboardInterrupt, SystemExit):

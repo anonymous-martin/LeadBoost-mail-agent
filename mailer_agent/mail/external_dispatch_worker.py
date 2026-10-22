@@ -115,6 +115,7 @@ from mailer_agent.models import (
     MessageStatus,
 )
 from mailer_agent.suppression import is_email_suppressed
+from mailer_agent.worker_status import CycleReport
 
 logger = logging.getLogger("mailer_agent.mail.external_dispatch_worker")
 settings = get_settings()
@@ -611,12 +612,18 @@ def run_external_dispatch_cycle(
     worker_id: Optional[str] = None,
     runtime: Optional[DispatchRuntime] = None,
     max_items: Optional[int] = None,
+    report: Optional[CycleReport] = None,
 ) -> list[DispatchResult]:
     """
     One polling cycle: claim -> process, one dispatch at a time, up to
     ``external_dispatch_max_per_cycle``. Claiming one row at a time (never a
     batch up front) means a claim never waits behind other sends and ages
     toward its lease. A database error ends the cycle; the next tick retries.
+
+    The database error is caught and logged HERE, so the returned list alone cannot tell "no work"
+    from "aborted by a database error". A caller that needs the difference (the scheduler job, for
+    the operator worker metrics) passes a ``CycleReport``; ``report.aborted`` is set in that case.
+    The return value and every behaviour are the same with or without it.
     """
     runtime = runtime or default_runtime
     limit = max_items if max_items is not None else settings.external_dispatch_max_per_cycle
@@ -630,6 +637,8 @@ def run_external_dispatch_cycle(
             )
         except SQLAlchemyError:
             logger.exception("external_dispatch cycle aborted by a database error")
+            if report is not None:
+                report.aborted = True
             break
         if result is None:
             break

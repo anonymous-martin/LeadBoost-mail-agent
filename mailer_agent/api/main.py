@@ -19,7 +19,12 @@ from mailer_agent.api import (
 from mailer_agent.api.deps import validate_auth_configuration
 from mailer_agent.config import get_settings
 from mailer_agent.db import prepare_schema
-from mailer_agent.followup.scheduler import start_scheduler, stop_scheduler
+from mailer_agent.followup.scheduler import (
+    mark_runtime_stopped,
+    start_scheduler,
+    stop_scheduler,
+)
+from mailer_agent.worker_status import ROLE_API_EMBEDDED
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("mailer_agent")
@@ -43,7 +48,7 @@ async def lifespan(app: FastAPI):
             "Messages will be generated and logged but NOT actually emailed."
         )
     if settings.run_scheduler_in_process:
-        start_scheduler()
+        start_scheduler(role=ROLE_API_EMBEDDED)
     else:
         logger.info(
             "RUN_SCHEDULER_IN_PROCESS=false -- this process will only serve the API. "
@@ -53,6 +58,7 @@ async def lifespan(app: FastAPI):
     yield
     if settings.run_scheduler_in_process:
         stop_scheduler()
+        mark_runtime_stopped()  # PR4: graceful stop of the embedded scheduler's liveness row
 
 
 app = FastAPI(

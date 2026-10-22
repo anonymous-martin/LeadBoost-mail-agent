@@ -53,6 +53,18 @@ from mailer_agent.mailbox_secrets import (
     decrypt_secret,
 )
 from mailer_agent.models import Mailbox, MailboxStatus
+from mailer_agent.worker_status import (
+    BUCKET_AMBIGUOUS,
+    BUCKET_DUPLICATE,
+    BUCKET_PERSISTED,
+    BUCKET_UNMATCHED,
+    BUCKET_UNRECOGNIZED,
+    OUTCOME_COMPLETED,
+    OUTCOME_DEGRADED,
+    OUTCOME_FAILED,
+    classification_flag,
+    classify_inbound_result,
+)
 
 logger = logging.getLogger("mailer_agent.mail.mailbox_inbound")
 
@@ -86,6 +98,15 @@ class MailboxPollOutcome:
     processed: int = 0   # messages durably handled and marked Seen
     left_unseen: int = 0  # messages that will be offered again next poll
     error_type: str | None = None
+    # PR4 -- what the handler ACTUALLY returned for each message it was given, by bucket
+    # (persisted / duplicate / unmatched / ambiguous / unrecognized), counted when the handler
+    # returns -- i.e. after its COMMIT and before the Seen flag. So these are handler outcomes, not
+    # a count of distinct emails: a message whose Seen flag then fails to store is offered again
+    # next poll and counted again, as a duplicate. Unmatched/ambiguous mail is deliberately NOT
+    # persisted as a Message row; this tally is the only (aggregate, address-free) trace of it.
+    handled: dict[str, int] = field(default_factory=dict)
+    classification_succeeded: int = 0  # persisted messages whose handler result said success
+    classification_failed: int = 0     # persisted messages whose handler result said failure
 
 
 def _default_session_factory() -> Session:
@@ -155,6 +176,24 @@ def _persist_inbound(
         db.close()
 
 
+def _tally_handler_result(outcome: MailboxPollOutcome, result: object) -> None:
+    """Fold one handler result into ``outcome`` as bucket counts. Never raises, keeps no content.
+
+    Only the bucket NAME and a boolean survive; the result dict (which can carry addresses or
+    reasons) is dropped here.
+    """
+    try:
+        bucket = classify_inbound_result(result)
+        outcome.handled[bucket] = outcome.handled.get(bucket, 0) + 1
+        flag = classification_flag(result)
+        if flag is True:
+            outcome.classification_succeeded += 1
+        elif flag is False:
+            outcome.classification_failed += 1
+    except Exception as exc:  # noqa: BLE001 - observability must never turn a handled message into a retry
+        logger.debug("inbound tally skipped (%s)", type(exc).__name__)
+
+
 def poll_mailbox(
     target: MailboxImapTarget, session_factory: SessionFactory | None = None
 ) -> MailboxPollOutcome:
@@ -184,7 +223,14 @@ def poll_mailbox(
             password = None  # noqa: F841 - drop the only plaintext reference
         # ----------------------------------------------------------------------
 
-        stats = drain_unseen(conn, lambda email_in: _persist_inbound(factory, target, email_in))
+        def _handle(email_in: InboundEmail) -> dict:
+            # Unchanged contract: persist, COMMIT, return -- only then does drain_unseen mark Seen.
+            # The tally happens strictly after that return value exists and cannot raise.
+            result = _persist_inbound(factory, target, email_in)
+            _tally_handler_result(outcome, result)
+            return result
+
+        stats = drain_unseen(conn, _handle)
         outcome.processed = stats.seen_marked
         outcome.left_unseen = stats.left_unseen
     except Exception as e:  # noqa: BLE001 - isolate this mailbox; type name only
@@ -203,24 +249,97 @@ def poll_mailbox(
     return outcome
 
 
-def poll_all_mailboxes(session_factory: SessionFactory | None = None) -> list[MailboxPollOutcome]:
-    """One cycle over every currently eligible mailbox. Never raises."""
-    outcomes: list[MailboxPollOutcome] = []
+@dataclass
+class MailboxCycleReport:
+    """One mailbox cycle: the per-mailbox outcomes, plus whether the mailbox LIST could be read.
+
+    ``poll_all_mailboxes`` returns ``[]`` both when no mailbox is eligible and when listing them
+    failed, so the list alone cannot tell "nothing to do" from "could not look".
+    """
+
+    outcomes: list[MailboxPollOutcome] = field(default_factory=list)
+    listing_failed: bool = False
+
+
+def poll_all_mailboxes_report(session_factory: SessionFactory | None = None) -> MailboxCycleReport:
+    """One cycle over every currently eligible mailbox, with the listing result. Never raises."""
+    report = MailboxCycleReport()
     try:
         ids = list_pollable_mailbox_ids(session_factory)
     except Exception as e:  # noqa: BLE001
         logger.error("Mailbox inbound cycle could not list mailboxes (%s)", type(e).__name__)
-        return outcomes
+        report.listing_failed = True
+        return report
     for mailbox_id in ids:
         try:
             target = load_pollable_target(mailbox_id, session_factory)  # fresh: disabled/rotated mid-cycle
             if target is None:
-                outcomes.append(MailboxPollOutcome(mailbox_id=mailbox_id, status=STATUS_SKIPPED))
+                report.outcomes.append(MailboxPollOutcome(mailbox_id=mailbox_id, status=STATUS_SKIPPED))
                 continue
-            outcomes.append(poll_mailbox(target, session_factory))
+            report.outcomes.append(poll_mailbox(target, session_factory))
         except Exception as e:  # noqa: BLE001
             logger.error("Mailbox %s poll crashed unexpectedly (%s)", mailbox_id, type(e).__name__)
-            outcomes.append(
+            report.outcomes.append(
                 MailboxPollOutcome(mailbox_id=mailbox_id, status=STATUS_UNEXPECTED, error_type=type(e).__name__)
             )
-    return outcomes
+    return report
+
+
+def poll_all_mailboxes(session_factory: SessionFactory | None = None) -> list[MailboxPollOutcome]:
+    """One cycle over every currently eligible mailbox. Never raises. (Outcomes only.)"""
+    return poll_all_mailboxes_report(session_factory).outcomes
+
+
+def summarize_mailbox_cycle(report: MailboxCycleReport) -> tuple[str, dict[str, int], str | None]:
+    """(cycle outcome, whitelisted counters, error type) for the worker status record.
+
+    failed    the mailbox list could not be read -- nothing was polled.
+    degraded  the cycle ran, but at least one mailbox could not be polled (credential unavailable,
+              IMAP error, unexpected error) or at least one message was left unseen.
+    completed every eligible mailbox was polled and nothing was left unseen. (Also true when there
+              were no eligible mailboxes: that is the honest result of a successful listing.)
+    """
+    c = dict.fromkeys(
+        (
+            "mailboxes_listed", "mailboxes_ok", "mailboxes_skipped_ineligible",
+            "mailboxes_credential_unavailable", "mailboxes_imap_error", "mailboxes_unexpected_error",
+            "messages_marked_seen", "messages_left_unseen",
+            "handled_persisted", "handled_duplicate", "handled_unmatched", "handled_ambiguous",
+            "handled_unrecognized", "classification_succeeded", "classification_failed",
+        ),
+        0,
+    )
+    status_key = {
+        STATUS_OK: "mailboxes_ok",
+        STATUS_SKIPPED: "mailboxes_skipped_ineligible",
+        STATUS_CREDENTIAL_UNAVAILABLE: "mailboxes_credential_unavailable",
+        STATUS_IMAP_ERROR: "mailboxes_imap_error",
+        STATUS_UNEXPECTED: "mailboxes_unexpected_error",
+    }
+    bucket_key = {
+        BUCKET_PERSISTED: "handled_persisted", BUCKET_DUPLICATE: "handled_duplicate",
+        BUCKET_UNMATCHED: "handled_unmatched", BUCKET_AMBIGUOUS: "handled_ambiguous",
+        BUCKET_UNRECOGNIZED: "handled_unrecognized",
+    }
+    first_error: str | None = None
+    for o in report.outcomes:
+        c["mailboxes_listed"] += 1
+        key = status_key.get(o.status)
+        if key:
+            c[key] += 1
+        c["messages_marked_seen"] += o.processed
+        c["messages_left_unseen"] += o.left_unseen
+        for bucket, n in o.handled.items():
+            if bucket in bucket_key:
+                c[bucket_key[bucket]] += n
+        c["classification_succeeded"] += o.classification_succeeded
+        c["classification_failed"] += o.classification_failed
+        if first_error is None and o.status != STATUS_OK and o.status != STATUS_SKIPPED:
+            first_error = o.error_type
+    if report.listing_failed:
+        return OUTCOME_FAILED, c, "MailboxListingFailed"
+    unhealthy = (
+        c["mailboxes_credential_unavailable"] + c["mailboxes_imap_error"]
+        + c["mailboxes_unexpected_error"] + c["messages_left_unseen"]
+    )
+    return (OUTCOME_DEGRADED if unhealthy else OUTCOME_COMPLETED), c, first_error
