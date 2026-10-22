@@ -166,6 +166,7 @@ class DispatchRuntime:
     def __init__(self) -> None:
         self._cond = threading.Condition()
         self._inflight: dict[int, ClaimedDispatch] = {}
+        self._claim_attempts = 0
         self._stopping = threading.Event()
 
     @property
@@ -173,7 +174,46 @@ class DispatchRuntime:
         return self._stopping.is_set()
 
     def request_shutdown(self) -> None:
-        self._stopping.set()
+        with self._cond:
+            self._stopping.set()
+            self._cond.notify_all()
+
+    def begin_claim_attempt(self) -> bool:
+        """Admit a claim attempt atomically with respect to shutdown."""
+        with self._cond:
+            if self._stopping.is_set():
+                return False
+            self._claim_attempts += 1
+            return True
+
+    def end_claim_attempt(self) -> None:
+        """Release a claim attempt that did not transfer into in-flight work."""
+        with self._cond:
+            if self._claim_attempts <= 0:
+                raise RuntimeError(
+                    "No active external-dispatch claim attempt to release"
+                )
+            self._claim_attempts -= 1
+            self._cond.notify_all()
+
+    def register_claim_attempt(self, claim: ClaimedDispatch) -> None:
+        """Atomically transfer one active attempt into the in-flight set."""
+        with self._cond:
+            if self._claim_attempts <= 0:
+                raise RuntimeError(
+                    "External-dispatch claim attempt was not admitted"
+                )
+            self._inflight[claim.dispatch_id] = claim
+            self._claim_attempts -= 1
+            self._cond.notify_all()
+
+    def resume_if_idle(self) -> bool:
+        """Resume only when no prior dispatch or claim attempt remains active."""
+        with self._cond:
+            if self._inflight or self._claim_attempts:
+                return False
+            self._stopping.clear()
+            return True
 
     def register(self, claim: ClaimedDispatch) -> None:
         with self._cond:
@@ -192,7 +232,7 @@ class DispatchRuntime:
         """Wait until nothing is in flight; False if `timeout` elapsed first."""
         deadline = time.monotonic() + max(0.0, timeout)
         with self._cond:
-            while self._inflight:
+            while self._inflight or self._claim_attempts:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
@@ -378,17 +418,26 @@ def _fail_in_b(db: Session, claim: ClaimedDispatch, ctx: _Ctx, reason: str) -> D
 def _transaction_b(
     factory: SessionFactory, worker_id: str, runtime: DispatchRuntime
 ) -> "None | DispatchResult | _Prepared":
-    db = factory()
     claim: Optional[ClaimedDispatch] = None
     handed_off = False
+    claim_attempt_open = False
+    db: Optional[Session] = None
     try:
+        # Count the attempt before any database operation. Shutdown must see
+        # this attempt even when it has not yet registered a claimed dispatch.
+        if not runtime.begin_claim_attempt():
+            return None
+        claim_attempt_open = True
+
+        db = factory()
         if runtime.stopping:
             return None
         claim = claim_next_external_dispatch(db, worker_id)
         if claim is None:
             db.rollback()
             return None
-        runtime.register(claim)
+        runtime.register_claim_attempt(claim)
+        claim_attempt_open = False
 
         dispatch = db.get(ExternalDispatch, claim.dispatch_id, populate_existing=True)
         ctx = _ctx_from(dispatch, worker_id)
@@ -468,9 +517,12 @@ def _transaction_b(
         )
         return None
     finally:
+        if claim_attempt_open:
+            runtime.end_claim_attempt()
         if claim is not None and not handed_off:
             runtime.unregister(claim.dispatch_id)
-        db.close()  # nothing survives past B
+        if db is not None:
+            db.close()  # nothing survives past B
 
 
 # ---------------------------------------------------------------------------

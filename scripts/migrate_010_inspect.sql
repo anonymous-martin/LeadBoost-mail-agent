@@ -53,5 +53,6 @@ WHERE c.relname = 'ix_messages_inbound_created_at';
 SELECT to_regclass('worker_runtime_status') AS worker_runtime_status,
        to_regclass('worker_cycle_status') AS worker_cycle_status;
 
--- 7. OPTIONAL, reads the whole table once: how many rows will the partial index actually hold?
-SELECT count(*) FILTER (WHERE direction = 'inbound') AS inbound_rows, count(*) AS total_rows FROM messages;
+-- 7. OPTIONAL HEAVY QUERY -- intentionally disabled in the default inspection run.
+-- This performs a full scan of messages. Run separately only if an exact count is operationally justified:
+-- SELECT count(*) FILTER (WHERE direction = 'inbound') AS inbound_rows, count(*) AS total_rows FROM messages;

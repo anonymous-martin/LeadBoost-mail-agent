@@ -397,6 +397,16 @@ def start_scheduler(role: str = ROLE_SCHEDULER) -> BackgroundScheduler:
     if _scheduler is not None:
         return _scheduler
 
+    # The embedded API lifespan can be entered again in the same process.
+    # Reopen the dispatch gate only if the previous lifecycle has no in-flight work.
+    # Do not use DispatchRuntime.reset(): it discards in-flight bookkeeping.
+    from mailer_agent.mail.external_dispatch_worker import default_runtime
+
+    if not default_runtime.resume_if_idle():
+        raise RuntimeError(
+            "Cannot start scheduler while previous external dispatches remain in flight"
+        )
+
     # A fresh random process identity per start (never hostname/WORKER_ID), created here but written
     # only by the heartbeat job below -- so starting a scheduler touches no table by itself.
     _runtime_recorder = WorkerStatusRecorder(role)
