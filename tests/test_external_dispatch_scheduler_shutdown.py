@@ -358,3 +358,97 @@ def test_real_worker_process_runs_graceful_shutdown_on_sigterm(tmp_path):
     assert "Shutting down background worker" in text, text
     assert "external_dispatch: shutdown requested" in text, text
     assert text.index("shutdown requested") < text.index("Scheduler stopped"), text
+
+
+
+# PR4 shutdown liveness regression tests
+def test_shutdown_marks_stopped_only_after_successful_drain(monkeypatch):
+    order = []
+    monkeypatch.setattr(
+        worker_mod, "begin_external_dispatch_shutdown",
+        lambda: order.append("stop_claiming"),
+    )
+    monkeypatch.setattr(
+        worker_mod, "stop_scheduler",
+        lambda: order.append("stop_scheduler"),
+    )
+    monkeypatch.setattr(
+        worker_mod, "drain_external_dispatches_on_shutdown",
+        lambda: order.append("drain") or w.ShutdownReport(True, (), ()),
+    )
+
+    class _Scope:
+        def __enter__(self):
+            order.append("release_claims")
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(worker_mod, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(worker_mod, "release_all_claims", lambda db, wid: 0)
+    monkeypatch.setattr(
+        worker_mod, "mark_runtime_stopped",
+        lambda: order.append("mark_stopped"),
+    )
+
+    worker_mod.graceful_shutdown("w-1")
+
+    assert order == [
+        "stop_claiming", "stop_scheduler", "drain",
+        "release_claims", "mark_stopped",
+    ]
+
+
+def test_shutdown_timeout_does_not_mark_worker_stopped(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(worker_mod, "begin_external_dispatch_shutdown", lambda: None)
+    monkeypatch.setattr(worker_mod, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(
+        worker_mod, "drain_external_dispatches_on_shutdown",
+        lambda: w.ShutdownReport(False, (123,), ()),
+    )
+
+    class _Scope:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(worker_mod, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(worker_mod, "release_all_claims", lambda db, wid: 0)
+    monkeypatch.setattr(
+        worker_mod, "mark_runtime_stopped", lambda: stopped.append(True)
+    )
+
+    worker_mod.graceful_shutdown("w-1")
+
+    assert stopped == []
+
+
+def test_shutdown_drain_exception_does_not_mark_worker_stopped(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(worker_mod, "begin_external_dispatch_shutdown", lambda: None)
+    monkeypatch.setattr(worker_mod, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(
+        worker_mod, "drain_external_dispatches_on_shutdown",
+        lambda: (_ for _ in ()).throw(RuntimeError("simulated drain failure")),
+    )
+
+    class _Scope:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(worker_mod, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(worker_mod, "release_all_claims", lambda db, wid: 0)
+    monkeypatch.setattr(
+        worker_mod, "mark_runtime_stopped", lambda: stopped.append(True)
+    )
+
+    worker_mod.graceful_shutdown("w-1")
+
+    assert stopped == []

@@ -106,49 +106,64 @@ def install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
+
 def graceful_shutdown(worker_id: str) -> None:
-    """The ordered shutdown described in the module docstring. Each step is
-    best-effort and isolated so one failure cannot skip the next."""
+    """Perform a conservative, best-effort worker shutdown."""
     logger.info("Shutting down background worker (worker_id=%s)", worker_id)
+    shutdown_ready = True
 
     try:
-        begin_external_dispatch_shutdown()  # 1. no new external-dispatch claims
+        begin_external_dispatch_shutdown()
     except Exception as exc:  # noqa: BLE001
+        shutdown_ready = False
         logger.warning("Could not stop external dispatch claiming: %s", exc)
 
     try:
-        stop_scheduler()  # 2. no new job triggers (running jobs continue)
+        stop_scheduler()
     except Exception as exc:  # noqa: BLE001
+        shutdown_ready = False
         logger.warning("Could not stop scheduler cleanly: %s", exc)
 
+    drain_report = None
     try:
-        report = drain_external_dispatches_on_shutdown()  # 3 + 4
-        if report.abandoned_unknown or not report.drained:
+        drain_report = drain_external_dispatches_on_shutdown()
+        if drain_report.abandoned_unknown or not drain_report.drained:
             logger.warning(
                 "External dispatch shutdown: drained=%s resolved_to_unknown=%s not_owned=%s",
-                report.drained, list(report.abandoned_unknown), list(report.still_owned_elsewhere),
+                drain_report.drained,
+                list(drain_report.abandoned_unknown),
+                list(drain_report.still_owned_elsewhere),
             )
+        if not drain_report.drained:
+            shutdown_ready = False
     except Exception as exc:  # noqa: BLE001
-        logger.warning("External dispatch drain failed; lease recovery will resolve: %s", exc)
+        shutdown_ready = False
+        logger.warning(
+            "External dispatch drain failed; lease recovery will resolve: %s", exc
+        )
 
-    # 5. Phase 8: Release any Contact claims so the next worker can pick them
-    # up immediately rather than waiting for lease expiry.
+    # Release Contact claims, but don't report a clean stop if release fails.
     try:
         with session_scope() as db:
             released = release_all_claims(db, worker_id)
             if released:
                 logger.info("Released %d claim(s) on graceful shutdown", released)
-    except Exception as exc:  # noqa: BLE001 — best-effort, don't mask shutdown
+    except Exception as exc:  # noqa: BLE001
+        shutdown_ready = False
         logger.warning("Could not release claims on shutdown: %s", exc)
 
-    # 6. PR4: mark this process's liveness row stopped -- LAST, after in-flight sends have drained
-    # and claims are released, so "stopped" is never shown while work is still in flight. Best-effort:
-    # if the database is unreachable the heartbeat simply ages into "stale"; nothing else changes.
-    try:
-        mark_runtime_stopped()
-    except Exception:  # noqa: BLE001
-        logger.warning("Could not mark worker runtime stopped")
-
+    # A timed-out SMTP operation may still be in flight. Preserve "stale"
+    # semantics unless all shutdown prerequisites and the drain succeeded.
+    if shutdown_ready and drain_report is not None and drain_report.drained:
+        try:
+            mark_runtime_stopped()
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not mark worker runtime stopped")
+    else:
+        logger.warning(
+            "Worker runtime not marked stopped because shutdown/drain was incomplete; "
+            "heartbeat will age into stale"
+        )
 
 if __name__ == "__main__":
     prepare_schema()
