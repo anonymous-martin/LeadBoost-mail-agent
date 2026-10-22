@@ -238,14 +238,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+
       - name: Install a disposable IMAP server
+        timeout-minutes: 10
         # Throw-away local Dovecot on 127.0.0.1 with a self-signed cert and
         # generated accounts; no external network or real mailbox is used.
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y dovecot-imapd
-          sudo systemctl stop dovecot || true
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            update
 
+          sudo DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            install -y dovecot-imapd
+
+          sudo systemctl stop dovecot || true
       - name: Run M3 IMAP end-to-end + C12 full-chain tests
         # Root is needed so Dovecot can drop to its service users.
         env:
