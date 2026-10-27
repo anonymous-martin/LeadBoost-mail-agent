@@ -8,19 +8,22 @@ and the real-protocol check is tests/test_m3_imap_e2e.py.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from types import SimpleNamespace
 
 import pytest
 from pydantic import SecretStr
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from mailer_agent.config import get_settings
 from mailer_agent.mail import imap_reader, mailbox_inbound
 from mailer_agent.mail import reply_handler_v2 as rh
 from mailer_agent.mailbox_secrets import encrypt_secret
+from mailer_agent.memory.store import build_conversation_context
 from mailer_agent.models import (
     Campaign, Contact, ExternalDispatch, Mailbox, MailboxStatus, Message,
+    UnmatchedInboundMessage,
 )
 from tests.m3_support import (
     FakeImapWorld, inbound_rows, make_session_factory, raw_email,
@@ -560,3 +563,351 @@ def test_inbound_instructions_are_untrusted_data_and_cannot_move_tenants(env, mo
     assert seen_by_classifier["campaign_org"] == "org-a"        # tenant came from the Mailbox, not the text
     assert [r.body for r in rows(env, ids.ct_a)] == [hostile]   # stored verbatim, as data
     assert rows(env, ids.ct_b) == [] and env.world.is_seen(HOST_A, USER_A, uid)
+
+
+# --- unmatched / ambiguous mail is retained before it is marked Seen ------------------
+# Invariant under test: an IMAP message is never marked \Seen unless it is either persisted
+# as a correlated Message or durably retained, unattached, in unmatched_inbound_messages.
+
+def retained(env):
+    with env.sm() as db:
+        out = db.query(UnmatchedInboundMessage).order_by(UnmatchedInboundMessage.id).all()
+        for r in out:
+            db.expunge(r)
+        return out
+
+
+def _only_seen_state(env):
+    return [m["seen"] for m in env.world.accounts[(HOST_A, USER_A)].messages]
+
+
+def test_correlated_reply_is_persisted_before_seen_and_retains_nothing(env):
+    ids = two_orgs(env)
+    uid = env.world.inject(HOST_A, USER_A, raw_email(message_id="<ok@p>", in_reply_to=OUT_A))
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert [r.message_id_header for r in rows(env, ids.ct_a)] == ["<ok@p>"]
+    assert env.world.is_seen(HOST_A, USER_A, uid)
+    assert retained(env) == []
+    assert out[ids.mb_a].handled == {"persisted": 1}
+
+
+def test_unmatched_reply_is_retained_not_silently_discarded(env):
+    ids = two_orgs(env, same_contact_email=False)
+    uid = env.world.inject(HOST_A, USER_A, raw_email(
+        from_addr="stranger@nowhere.example", subject="Re: hello", body="UNMATCHED-BODY-1",
+        message_id="<u1@p>", in_reply_to="<unknown@p>", references=["<unknown@p>"]))
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert env.world.is_seen(HOST_A, USER_A, uid)
+    assert out[ids.mb_a].handled == {"unmatched": 1}          # metrics bucket is unchanged
+    [r] = retained(env)
+    # tenant and mailbox come from the polled Mailbox row; the reason is recorded; nothing is attached
+    assert (r.mailbox_id, r.organization_id, r.message_id_header, r.reason) == (
+        ids.mb_a, "org-a", "<u1@p>", "no_match")
+    assert r.from_email == "stranger@nowhere.example" and r.subject == "Re: hello"
+    assert "UNMATCHED-BODY-1" in r.body
+    assert r.in_reply_to_header == "<unknown@p>" and r.resolved_at is None
+    assert rows(env) == []                                    # not a Message of any contact
+
+
+@pytest.mark.parametrize("how", ["sender_address", "thread_references"])
+def test_ambiguous_reply_is_retained_unattached_and_exposed_in_no_conversation(env, how):
+    ids = two_orgs(env, same_contact_email=(how == "sender_address"))
+    with env.sm() as db:
+        camp = db.query(Campaign).filter(Campaign.organization_id == "org-a").one()
+        if how == "sender_address":
+            other = Campaign(name="native", organization_id="org-a", sender_name="n", sender_org="o",
+                             sender_email="s@a.example", value_prop="v")
+            db.add(other)
+            db.flush()
+            db.add(Contact(campaign_id=other.id, email="lead@example.com"))   # 2nd contact, same address
+            raw = raw_email(message_id="<amb@p>", body="AMBIGUOUS-BODY-2")
+        else:
+            c2 = Contact(campaign_id=camp.id, email="second@example.com")
+            db.add(c2)
+            db.flush()
+            db.add(Message(contact_id=c2.id, direction="outbound", body="x", status="sent",
+                           message_id_header="<out-a-2@mailer.a>"))
+            raw = raw_email(message_id="<amb@p>", body="AMBIGUOUS-BODY-2", in_reply_to=OUT_A,
+                            references=["<out-a-2@mailer.a>"])
+        db.commit()
+    uid = env.world.inject(HOST_A, USER_A, raw)
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert out[ids.mb_a].handled == {"ambiguous": 1}
+    assert env.world.is_seen(HOST_A, USER_A, uid)
+    [r] = retained(env)
+    assert (r.reason, r.organization_id, r.mailbox_id) == ("ambiguous", "org-a", ids.mb_a)
+    assert rows(env) == []                                    # attached to neither candidate
+    with env.sm() as db:                                      # and visible in no contact's transcript
+        for contact in db.query(Contact).all():
+            assert "AMBIGUOUS-BODY-2" not in build_conversation_context(db, contact)
+
+
+def test_unmatched_message_is_committed_before_it_is_marked_seen(env, monkeypatch):
+    two_orgs(env, same_contact_email=False)
+    for i in range(2):
+        env.world.inject(HOST_A, USER_A, raw_email(from_addr="stranger@nowhere.example", message_id=f"<o{i}@p>"))
+    log = []
+
+    def spying_factory():
+        s = env.sm()
+        real_commit = s.commit
+
+        def commit():
+            real_commit()
+            log.append("commit")
+
+        s.commit = commit
+        return s
+
+    orig = mailbox_inbound.drain_unseen
+
+    def wrapped_drain(conn, handler):
+        class Spy:
+            def __getattr__(self, n):
+                return getattr(conn, n)
+
+            def uid(self, cmd, *a):
+                if cmd.upper() == "STORE":
+                    log.append("store")
+                return conn.uid(cmd, *a)
+
+        return orig(Spy(), handler)
+
+    monkeypatch.setattr(mailbox_inbound, "drain_unseen", wrapped_drain)
+    mailbox_inbound.poll_all_mailboxes(spying_factory)
+    assert [e for e in log if e in ("commit", "store")] == ["commit", "store"] * 2
+    assert len(retained(env)) == 2
+
+
+def test_commit_failure_while_retaining_leaves_the_message_unseen_and_the_next_poll_retries(env):
+    ids = two_orgs(env, same_contact_email=False)
+    uid = env.world.inject(HOST_A, USER_A, raw_email(from_addr="stranger@nowhere.example", message_id="<cf@p>"))
+    state = {"fail": True}
+
+    def flaky_factory():
+        s = env.sm()
+        real_commit = s.commit
+
+        def commit():
+            if state["fail"]:
+                raise OperationalError("COMMIT", {}, Exception("db down"))
+            return real_commit()
+
+        s.commit = commit
+        return s
+
+    out1 = mailbox_inbound.poll_all_mailboxes(flaky_factory)
+    assert retained(env) == []                                 # nothing durable
+    assert not env.world.is_seen(HOST_A, USER_A, uid)          # so NOT marked Seen
+    assert [o.left_unseen for o in out1 if o.mailbox_id == ids.mb_a] == [1]
+
+    state["fail"] = False
+    cycle(env)
+    assert len(retained(env)) == 1 and env.world.is_seen(HOST_A, USER_A, uid)
+
+
+def test_failure_to_retain_never_results_in_seen(env, monkeypatch):
+    ids = two_orgs(env, same_contact_email=False)
+    uid = env.world.inject(HOST_A, USER_A, raw_email(from_addr="stranger@nowhere.example", message_id="<rf@p>"))
+
+    def boom(*_a, **_kw):
+        raise OperationalError("INSERT", {}, Exception("db down"))
+
+    monkeypatch.setattr(rh, "_retain_unmatched", boom)
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert not env.world.is_seen(HOST_A, USER_A, uid)
+    assert out[ids.mb_a].left_unseen == 1 and retained(env) == []
+
+
+def test_non_duplicate_integrity_error_during_retention_is_not_success(env, monkeypatch):
+    """A constraint failure that is NOT the (mailbox_id, Message-ID) duplicate must propagate.
+
+    Correlation is stubbed to yield neither a contact nor a reason, so the retention INSERT violates
+    ``reason NOT NULL`` -- a real IntegrityError from the database, unrelated to the unique key. It must
+    not be treated as "already retained": nothing is committed and the message must stay Unseen."""
+    ids = two_orgs(env, same_contact_email=False)
+    raw = raw_email(from_addr="stranger@nowhere.example", message_id="<ie@p>")
+    uid = env.world.inject(HOST_A, USER_A, raw)
+    monkeypatch.setattr(rh, "_correlate_mailbox_inbound", lambda *a, **k: (None, None))
+
+    with env.sm() as db:                                       # the handler itself must not return a result
+        with pytest.raises(IntegrityError):
+            rh.process_mailbox_inbound(
+                db, imap_reader.parse_inbound_bytes(raw), mailbox_id=ids.mb_a, organization_id="org-a")
+        db.rollback()
+
+    out = {o.mailbox_id: o for o in cycle(env)}                # and the poller must report it as left unseen
+    assert not env.world.is_seen(HOST_A, USER_A, uid)
+    assert out[ids.mb_a].left_unseen == 1 and out[ids.mb_a].processed == 0
+    assert out[ids.mb_a].handled == {}                         # no handler result was ever produced
+    assert retained(env) == [] and rows(env) == []             # nothing committed by the failed operation
+
+
+def test_conflict_on_a_row_that_is_not_the_exact_identity_is_not_treated_as_a_duplicate(env):
+    """A uniqueness conflict counts as "already retained" only if the exact (mailbox, Message-ID, tenant)
+    row exists. Here the conflicting row carries another organization: that is never success."""
+    ids = two_orgs(env, same_contact_email=False)
+    with env.sm() as db:
+        db.add(UnmatchedInboundMessage(
+            mailbox_id=ids.mb_a, organization_id="org-x", message_id_header="<cx@p>",
+            reason="no_match", body="SEEDED"))
+        db.commit()
+    uid = env.world.inject(HOST_A, USER_A, raw_email(from_addr="stranger@nowhere.example", message_id="<cx@p>"))
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert not env.world.is_seen(HOST_A, USER_A, uid) and out[ids.mb_a].left_unseen == 1
+    [r] = retained(env)
+    assert (r.organization_id, r.body) == ("org-x", "SEEDED")  # untouched; no second row
+
+
+def test_a_conflict_is_a_duplicate_only_after_the_exact_row_is_confirmed_to_exist(env, monkeypatch):
+    ids = two_orgs(env, same_contact_email=False)
+    env.world.inject(HOST_A, USER_A, raw_email(from_addr="stranger@nowhere.example", message_id="<cc@p>"))
+    cycle(env)                                                 # retained and Seen
+    assert len(retained(env)) == 1
+    env.world.accounts[(HOST_A, USER_A)].messages[0]["seen"] = False
+    monkeypatch.setattr(rh, "_retained_row_exists", lambda *a, **k: False)   # the confirmation step says no
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert out[ids.mb_a].left_unseen == 1 and not env.world.is_seen(
+        HOST_A, USER_A, env.world.accounts[(HOST_A, USER_A)].messages[0]["uid"])
+    assert len(retained(env)) == 1
+
+
+def test_retrying_an_unmatched_message_never_duplicates_the_retained_row(env):
+    ids = two_orgs(env, same_contact_email=False)
+    env.world.inject(HOST_A, USER_A, raw_email(from_addr="stranger@nowhere.example", message_id="<d1@p>"))
+    env.world.inject(HOST_A, USER_A, raw_email(from_addr="stranger@nowhere.example", message_id=None))  # synthetic id
+    env.world.fail_store = True                                # durable, but Seen could not be stored
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert out[ids.mb_a].left_unseen == 2 and len(retained(env)) == 2
+    env.world.fail_store = False
+    cycle(env)
+    cycle(env)
+    assert len(retained(env)) == 2 and _only_seen_state(env) == [True, True]
+    for m in env.world.accounts[(HOST_A, USER_A)].messages:    # an operator re-offers both once more
+        m["seen"] = False
+    cycle(env)
+    assert len(retained(env)) == 2 and _only_seen_state(env) == [True, True]
+    assert sum(r.message_id_header.startswith("synthetic:") for r in retained(env)) == 1
+    assert rows(env) == []
+
+
+def test_retained_message_is_recoverable_and_marked_resolved_once_the_cause_is_fixed(env):
+    ids = two_orgs(env, same_contact_email=False)
+    uid = env.world.inject(HOST_A, USER_A, raw_email(
+        from_addr="late@example.com", message_id="<r1@p>", body="RECOVER-ME"))
+    cycle(env)
+    [r] = retained(env)
+    assert r.resolved_at is None and rows(env) == []           # diagnosable: unresolved, attached to nothing
+    with env.sm() as db:                                       # the cause is fixed: the contact now exists
+        camp = db.query(Campaign).filter(Campaign.organization_id == "org-a").one()
+        db.add(Contact(campaign_id=camp.id, email="late@example.com"))
+        db.commit()
+    env.world.accounts[(HOST_A, USER_A)].messages[0]["seen"] = False   # operator re-offers it
+    cycle(env)
+    [r] = retained(env)                                        # kept for audit, now resolved, not duplicated
+    assert r.resolved_at is not None
+    assert [(m.message_id_header, m.mailbox_id) for m in rows(env)] == [("<r1@p>", ids.mb_a)]
+    assert env.world.is_seen(HOST_A, USER_A, uid)
+    cycle(env)                                                 # nothing further happens
+    assert len(rows(env)) == 1 and len(retained(env)) == 1
+
+
+def test_retained_mail_is_bound_to_the_polled_mailbox_and_never_crosses_tenants(env):
+    ids = two_orgs(env, same_contact_email=False)   # org-a: lead@example.com ; org-b: other@example.com
+    # A sender who is only org B's contact writes to mailbox A; the same RFC Message-ID also arrives,
+    # unmatched, in mailbox B. Each mailbox retains its own copy for its own organization.
+    env.world.inject(HOST_A, USER_A, raw_email(from_addr="other@example.com", message_id="<same@p>", body="X-A"))
+    env.world.inject(HOST_B, USER_B, raw_email(from_addr="nobody@example.com", message_id="<same@p>", body="X-B"))
+    cycle(env)
+    got = {(r.organization_id, r.mailbox_id): r.body for r in retained(env)}
+    assert set(got) == {("org-a", ids.mb_a), ("org-b", ids.mb_b)}
+    assert "X-A" in got[("org-a", ids.mb_a)] and "X-B" in got[("org-b", ids.mb_b)]
+    assert rows(env) == []                           # nothing attached to org B's "other@" contact
+
+
+# --- correlated replies: the same "never Seen without a durable row" guarantee --------
+# The correlated Message insert uses a conflict-safe INSERT on the partial unique index
+# uq_messages_mailbox_message_id; only a verified existing row (this tenant, this mailbox,
+# this Message-ID, inbound) may be reported as a duplicate. Everything else must propagate.
+
+def _seed_message(env, *, contact_id, mailbox_id, identity, direction):
+    with env.sm() as db:
+        db.add(Message(contact_id=contact_id, mailbox_id=mailbox_id, direction=direction, body="SEEDED",
+                       status="received", message_id_header=identity))
+        db.commit()
+
+
+def _count_messages_with_identity(env, identity):
+    with env.sm() as db:
+        return db.query(Message).filter(Message.message_id_header == identity).count()
+
+
+def test_correlated_reply_with_an_unexpected_integrity_error_is_not_success_and_stays_unseen(env, monkeypatch):
+    """A constraint failure that is not the duplicate key (here body NOT NULL) must propagate."""
+    ids = two_orgs(env)
+    raw = raw_email(message_id="<ci@p>", in_reply_to=OUT_A)
+    uid = env.world.inject(HOST_A, USER_A, raw)
+
+    with env.sm() as db:                                       # the handler itself must not return a result
+        with pytest.raises(IntegrityError):
+            rh.process_mailbox_inbound(
+                db, dataclasses.replace(imap_reader.parse_inbound_bytes(raw), body_text=None),
+                mailbox_id=ids.mb_a, organization_id="org-a")
+        db.rollback()
+
+    real = imap_reader.parse_inbound_bytes
+    monkeypatch.setattr(imap_reader, "parse_inbound_bytes",
+                        lambda b, *a, **k: dataclasses.replace(real(b, *a, **k), body_text=None))
+    out = {o.mailbox_id: o for o in cycle(env)}                # and the poller must leave it Unseen
+    assert not env.world.is_seen(HOST_A, USER_A, uid)
+    assert out[ids.mb_a].left_unseen == 1 and out[ids.mb_a].handled == {}
+    assert rows(env, ids.ct_a) == [] and retained(env) == []
+
+
+def test_true_duplicate_of_a_persisted_correlated_reply_is_idempotent(env):
+    ids = two_orgs(env)
+    uid = env.world.inject(HOST_A, USER_A, raw_email(message_id="<dup@p>", in_reply_to=OUT_A))
+    cycle(env)
+    [first] = rows(env, ids.ct_a)
+    env.world.accounts[(HOST_A, USER_A)].messages[0]["seen"] = False      # re-offered
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert out[ids.mb_a].handled == {"duplicate": 1} and env.world.is_seen(HOST_A, USER_A, uid)
+    assert [m.id for m in rows(env, ids.ct_a)] == [first.id]
+    assert retained(env) == []
+
+
+def test_a_lost_race_is_a_duplicate_only_after_the_exact_existing_row_is_verified(env, monkeypatch):
+    """Simulate the race: the duplicate pre-check misses (the winner commits just after it), so the
+    INSERT hits the unique index. The result is a duplicate only because the verification finds the row."""
+    ids = two_orgs(env)
+    uid = env.world.inject(HOST_A, USER_A, raw_email(message_id="<race@p>", in_reply_to=OUT_A))
+    cycle(env)
+    env.world.accounts[(HOST_A, USER_A)].messages[0]["seen"] = False
+    real, calls = rh._find_inbound_message, []
+
+    def blind_precheck(*a, **k):
+        calls.append(1)
+        return None if len(calls) == 1 else real(*a, **k)
+
+    monkeypatch.setattr(rh, "_find_inbound_message", blind_precheck)
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert len(calls) == 2                                     # pre-check, then the verification
+    assert out[ids.mb_a].handled == {"duplicate": 1} and env.world.is_seen(HOST_A, USER_A, uid)
+    assert _count_messages_with_identity(env, "<race@p>") == 1
+
+
+@pytest.mark.parametrize("seed", ["other_tenants_contact", "outbound_row"])
+def test_a_unique_key_conflict_without_a_matching_tenant_row_is_not_a_successful_duplicate(env, seed):
+    """The conflicting row occupies the (mailbox, Message-ID) key but is not this tenant's inbound
+    message (corrupt data: another tenant's contact, or an outbound row). Never success; stays Unseen."""
+    ids = two_orgs(env)
+    if seed == "other_tenants_contact":
+        _seed_message(env, contact_id=ids.ct_b, mailbox_id=ids.mb_a, identity="<x@p>", direction="inbound")
+    else:
+        _seed_message(env, contact_id=ids.ct_a, mailbox_id=ids.mb_a, identity="<x@p>", direction="outbound")
+    uid = env.world.inject(HOST_A, USER_A, raw_email(message_id="<x@p>", in_reply_to=OUT_A))
+    out = {o.mailbox_id: o for o in cycle(env)}
+    assert not env.world.is_seen(HOST_A, USER_A, uid)
+    assert out[ids.mb_a].left_unseen == 1 and out[ids.mb_a].handled == {}
+    assert rows(env, ids.ct_a) == []                           # nothing stored for this tenant
+    assert _count_messages_with_identity(env, "<x@p>") == 1    # the seeded row is untouched; no second row

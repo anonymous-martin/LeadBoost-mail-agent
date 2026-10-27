@@ -143,8 +143,8 @@ Steps are in order. Do not start a step before the previous one is confirmed.
 8. **Apply the guarded, ordered migration only after explicit operator approval** and the
    backup acknowledgement the tool requires: `MIGRATE_CONFIRM_BACKUP=I_HAVE_A_VERIFIED_BACKUP_OF_<database name>`
    (the database name the tool printed) `scripts/migrate_release.sh`. The wrapper runs
-   `init_db()` and then the canonical **12 steps** in order (`migrations/README.md`; step 12 is the PR 4
-   observability migration 010).
+   `init_db()` and then the canonical **13 steps** in order (`migrations/README.md`; step 12 is the PR 4
+   observability migration 010, step 13 the unmatched-inbound table, migration 011).
 9. **If a step fails, stop immediately** and use the recovery procedure (sections 5 and 9).
    Do not run later steps manually, do not run steps individually, and do not
    `stamp`/skip anything.

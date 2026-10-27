@@ -775,6 +775,47 @@ class Mailbox(Base):
         return f"<Mailbox {self.public_reference}>"
 
 
+class UnmatchedInboundMessage(Base):
+    """
+    Durable retention of mailbox-polled inbound mail that could not be attached to exactly one
+    contact (reason ``no_match`` or ``ambiguous``).
+
+    Why a separate table: ``messages.contact_id`` is NOT NULL, and an unmatched or ambiguous message
+    must never be attached to a contact it may not belong to. Nothing in the conversation, transcript
+    or classification paths reads this table -- it is an operator-facing holding area only.
+
+    ``organization_id`` and ``mailbox_id`` come from the polled Mailbox row, never from the message.
+    ``message_id_header`` is the same dedupe identity Message rows use (the RFC Message-ID, or
+    ``synthetic:<sha256>``), so a re-offered message converges on one row.
+
+    The row is written in the same transaction that precedes the IMAP \\Seen flag
+    (mail/mailbox_inbound.py::_persist_inbound), which is what makes that flag safe to set.
+    ``resolved_at`` is set if the same message is later attached to a contact (an operator marks it
+    Unseen again after fixing the cause); the retained copy is then kept for audit, not deleted.
+    """
+    __tablename__ = "unmatched_inbound_messages"
+
+    id = Column(Integer, primary_key=True)
+    mailbox_id = Column(Integer, ForeignKey("mailboxes.id", ondelete="RESTRICT"), nullable=False)
+    organization_id = Column(String, nullable=False)
+    message_id_header = Column(String, nullable=False)
+    reason = Column(String, nullable=False)  # "no_match" | "ambiguous"
+    from_email = Column(String, nullable=True)
+    subject = Column(String, nullable=True)
+    body = Column(Text, nullable=False)
+    in_reply_to_header = Column(String, nullable=True)
+    references_header = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("mailbox_id", "message_id_header", name="uq_unmatched_inbound_mailbox_message_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UnmatchedInboundMessage {self.id} mailbox={self.mailbox_id} {self.reason}>"
+
+
 # ---------------------------------------------------------------------------
 # PR4: worker runtime status (operator observability)
 # ---------------------------------------------------------------------------

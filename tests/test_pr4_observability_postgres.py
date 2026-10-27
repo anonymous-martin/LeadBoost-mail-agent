@@ -291,7 +291,7 @@ def test_the_real_release_wrapper_fails_fast_under_contention_when_the_lock_time
     step 1/12). MIGRATE_LOCK_TIMEOUT_MS is the opt-in guard; prove it reaches every step via PGOPTIONS."""
     first = _run_wrapper(pg)
     assert first.returncode == 0, _out(first)
-    assert "(12/12) migrations/010_worker_runtime_status.py" in _out(first)
+    assert "(12/13) migrations/010_worker_runtime_status.py" in _out(first)
     assert "NOTE: no MIGRATE_LOCK_TIMEOUT_MS set" in _out(first)  # the default is loud about the hazard
     pg.sql(f"DROP INDEX {IDX}")  # back to "migrated through 009, 010's index not yet built"
     pg.sql("INSERT INTO campaigns (name, organization_id, sender_name, sender_org, sender_email, value_prop) "
