@@ -289,6 +289,8 @@ def _markers(conn):
         ("010  worker_cycle_status table", "worker_cycle_status" in tables),
         ("010  ix_messages_inbound_created_at (partial index, operator inbound metrics; must be VALID)",
          idx("messages", "ix_messages_inbound_created_at") and idx_valid("ix_messages_inbound_created_at")),
+        ("011  unmatched_inbound_messages table (retained unmatched/ambiguous mailbox mail)",
+         "unmatched_inbound_messages" in tables),
     ]
 
 

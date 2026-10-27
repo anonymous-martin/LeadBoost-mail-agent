@@ -70,6 +70,7 @@ STEPS=(
   "migrations/008_external_dispatch_deferred_message.py"
   "migrations/009_messages_mailbox_scoped_dedupe.py"
   "migrations/010_worker_runtime_status.py"
+  "migrations/011_unmatched_inbound_messages.py"
 )
 
 if [ "$MODE" = status ]; then

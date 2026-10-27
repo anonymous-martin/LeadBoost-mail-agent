@@ -135,12 +135,19 @@ jobs:
           # is, per requirements.txt). Without this, the whole suite
           # silently SKIPS (reported not-available) instead of running.
           POSTGRES_TEST_URL: postgresql+psycopg2://mailer_agent:mailer_agent_test_pw@localhost:5432/mailer_agent_test
+          # Explicit opt-in for the module that writes its own rows (tests/pg_target_guard.py): the
+          # database it may write to is exactly this job's disposable service container, and a missing or
+          # refused database is a hard failure there, never a skip.
+          MAILER_PG_TEST_OPT_IN: "1"
+          MAILER_PG_TEST_EXPECTED_DB: mailer_agent_test
+          REQUIRE_UNMATCHED_INBOUND_PG: "1"
         run: |
           python -m pytest -o addopts="" \
             tests/test_external_dispatch_postgres.py \
             tests/test_leadboost_generated_outreach_postgres.py \
             tests/test_postgresql_concurrency.py \
             tests/test_m3_inbound_postgres.py \
+            tests/test_unmatched_inbound_postgres.py \
             tests/test_leadboost_reconciliation_postgres.py \
             tests/test_leadboost_conversation_postgres.py -v
 

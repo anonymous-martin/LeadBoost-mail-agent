@@ -14,7 +14,9 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from sqlalchemy import func
+from sqlalchemy import func, text
+from sqlalchemy.dialects import postgresql as _pg_dialect
+from sqlalchemy.dialects import sqlite as _sqlite_dialect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,6 +37,7 @@ from mailer_agent.models import (
     MessageStatus,
     MessageType,
     SuppressionEntry,
+    UnmatchedInboundMessage,
     contact_is_integration_managed,
 )
 from mailer_agent.semantic.classifier import classify_prospect_reply
@@ -465,12 +468,18 @@ def process_mailbox_inbound(
         never mistaken for a duplicate (and never leaks its contact id);
       * correlation is organization- and mailbox-scoped (see
         _correlate_mailbox_inbound); no To:-header resolution;
-      * unmatched or ambiguous mail is NOT persisted and NOT guessed: it returns
-        an unmatched result carrying only a reason, and the caller marks it Seen
-        (existing behaviour -- no orphan table in M3).
+      * unmatched or ambiguous mail is NOT guessed and is NOT stored as a Message: it is
+        retained, unattached to any contact, in ``unmatched_inbound_messages`` (see
+        _retain_unmatched) and returns an unmatched result carrying only a reason. The caller's
+        commit therefore makes it durable BEFORE the IMAP message is marked Seen, so a Seen
+        message is never one that exists nowhere in the database.
+
+    A correlated message is inserted with a conflict-safe INSERT whose only absorbed outcome is
+    "this exact message is already stored" (see _insert_correlated_message); any other database
+    failure propagates, and a duplicate is reported only after the existing row has been verified.
 
     The caller owns the transaction: it must commit before marking the IMAP
-    message Seen. This function never commits.
+    message Seen. This function never commits and never rolls back.
     """
     email_in = replace(
         email_in,
@@ -486,18 +495,7 @@ def process_mailbox_inbound(
         # persist an un-dedupable row.
         raise ValueError("mailbox inbound requires a Message-ID or synthetic identity")
 
-    def _existing():
-        return (
-            db.query(Message)
-            .filter(
-                Message.mailbox_id == mailbox_id,
-                Message.message_id_header == identity,
-                Message.direction == MessageDirection.INBOUND.value,
-            )
-            .first()
-        )
-
-    existing = _existing()
+    existing = _find_inbound_message(db, mailbox_id=mailbox_id, identity=identity, organization_id=organization_id)
     if existing:
         logger.info("Duplicate inbound for mailbox %s (already stored), skipping", mailbox_id)
         return {
@@ -509,40 +507,210 @@ def process_mailbox_inbound(
         db, email_in, mailbox_id=mailbox_id, organization_id=organization_id
     )
     if contact is None:
+        _retain_unmatched(
+            db, email_in, identity=identity, mailbox_id=mailbox_id,
+            organization_id=organization_id, reason=reason,
+        )
         # Metadata only: no addresses, subject or body in the log line.
-        logger.info("Inbound for mailbox %s not attached to any contact (%s); not persisted", mailbox_id, reason)
+        logger.info(
+            "Inbound for mailbox %s not attached to any contact (%s); retained for review, not attached",
+            mailbox_id, reason,
+        )
         return {"matched": False, "action": f"unmatched_{reason}", "reason": reason}
 
     campaign = contact.campaign
-    inbound_msg = Message(
-        contact_id=contact.id,
-        mailbox_id=mailbox_id,
-        direction=MessageDirection.INBOUND.value,
-        message_type=None,
-        subject=email_in.subject,
-        body=email_in.body_text,
-        status=MessageStatus.RECEIVED.value,
-        message_id_header=identity,
-        in_reply_to_header=email_in.in_reply_to,
-        references_header=" ".join(email_in.references) if email_in.references else None,
+    inbound_msg, inserted = _insert_correlated_message(
+        db, email_in, contact_id=contact.id, identity=identity,
+        mailbox_id=mailbox_id, organization_id=organization_id,
     )
-    db.add(inbound_msg)
-    try:
-        db.flush()
-    except IntegrityError:
-        # Lost a race against a concurrent poll of the same mailbox: the
-        # (mailbox_id, Message-ID) index is what makes that safe.
-        db.rollback()
-        existing = _existing()
-        logger.info("Concurrent duplicate for mailbox %s resolved by unique index", mailbox_id)
+    if not inserted:
+        # Lost a race against a concurrent poll of the same mailbox. This is reported as a duplicate
+        # ONLY because _insert_correlated_message verified the exact existing row (this tenant, this
+        # mailbox, this Message-ID, inbound); anything it could not verify has already raised.
+        logger.info("Concurrent duplicate for mailbox %s resolved by unique index (existing row verified)", mailbox_id)
         return {
             "matched": True,
-            "contact_id": existing.contact_id if existing else None,
+            "contact_id": inbound_msg.contact_id,
             "action": "skipped_duplicate",
-            "message_id": existing.id if existing else None,
+            "message_id": inbound_msg.id,
         }
 
+    # If this exact message was retained earlier as unmatched/ambiguous and has now been attached
+    # (an operator fixed the cause and marked it Unseen), record that; the retained copy stays.
+    db.query(UnmatchedInboundMessage).filter(
+        UnmatchedInboundMessage.mailbox_id == mailbox_id,
+        UnmatchedInboundMessage.message_id_header == identity,
+        UnmatchedInboundMessage.resolved_at.is_(None),
+    ).update({"resolved_at": utcnow()}, synchronize_session=False)
+
     return _classify_and_apply_inbound(db, email_in, contact, campaign, inbound_msg)
+
+
+class MessagePersistenceNotConfirmedError(RuntimeError):
+    """A correlated inbound message could not be confirmed as stored (an insert conflict whose existing
+    row is not this tenant's inbound message for this mailbox and Message-ID). Raised so the handler
+    never reports success without a durable row: the poller then leaves the IMAP message Unseen."""
+
+
+def _dialect_insert(db: Session):
+    """The dialect-specific INSERT constructor that supports ON CONFLICT. Only PostgreSQL and SQLite
+    are supported (the only dialects this service runs on); anything else fails closed."""
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        return _pg_dialect.insert
+    if dialect == "sqlite":
+        return _sqlite_dialect.insert
+    raise RetentionNotConfirmedError(f"conflict-safe inbound persistence is not supported on dialect {dialect!r}")
+
+
+def _find_inbound_message(db: Session, *, mailbox_id: int, identity: str, organization_id: str) -> Message | None:
+    """The inbound Message stored for exactly this (mailbox_id, Message-ID) AND owned by this tenant
+    (Message -> Contact -> Campaign.organization_id). Tenant scoping is mandatory here: passing None
+    would silently return an unscoped query, so it is refused."""
+    if organization_id is None:
+        raise ValueError("a tenant (organization_id) is required to look up a mailbox inbound message")
+    return _scope_messages_to_org(
+        db.query(Message).filter(
+            Message.mailbox_id == mailbox_id,
+            Message.message_id_header == identity,
+            Message.direction == MessageDirection.INBOUND.value,
+        ),
+        organization_id,
+    ).first()
+
+
+def _insert_correlated_message(
+    db: Session,
+    email_in: InboundEmail,
+    *,
+    contact_id: int,
+    identity: str,
+    mailbox_id: int,
+    organization_id: str,
+) -> tuple[Message, bool]:
+    """
+    Insert the inbound Message for a correlated reply. Returns ``(message, inserted)``.
+
+    The arbiter is the partial unique index ``uq_messages_mailbox_message_id`` --
+    UNIQUE (mailbox_id, message_id_header) WHERE mailbox_id IS NOT NULL (models.Message.__table_args__,
+    migration 009) -- so the conflict target repeats that exact predicate. ``ON CONFLICT ... DO
+    NOTHING`` absorbs only a uniqueness conflict on that one index. Every other failure (NOT NULL,
+    foreign key, a different constraint) raises IntegrityError out of this function; nothing is caught,
+    rolled back or hidden here.
+
+    If the insert was absorbed, the existing row is looked up with the SAME tenant-scoped query as
+    the duplicate pre-check (this tenant, this mailbox, this Message-ID, inbound). Only a row found
+    that way is a duplicate (``inserted=False``). Any other conflicting row -- another tenant's, or an
+    outbound row -- is not accepted: MessagePersistenceNotConfirmedError is raised.
+    """
+    stmt = (
+        _dialect_insert(db)(Message)
+        .values(
+            contact_id=contact_id,
+            mailbox_id=mailbox_id,
+            direction=MessageDirection.INBOUND.value,
+            message_type=None,
+            subject=email_in.subject,
+            body=email_in.body_text,
+            status=MessageStatus.RECEIVED.value,
+            message_id_header=identity,
+            in_reply_to_header=email_in.in_reply_to,
+            references_header=" ".join(email_in.references) if email_in.references else None,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["mailbox_id", "message_id_header"],
+            index_where=text("mailbox_id IS NOT NULL"),
+        )
+        .returning(Message.id)
+    )
+    new_id = db.execute(stmt).scalar_one_or_none()
+    if new_id is not None:
+        return db.get(Message, new_id), True
+    existing = _find_inbound_message(db, mailbox_id=mailbox_id, identity=identity, organization_id=organization_id)
+    if existing is None:
+        raise MessagePersistenceNotConfirmedError(
+            f"mailbox {mailbox_id}: the insert conflicted but no inbound message for this tenant, mailbox "
+            f"and Message-ID exists"
+        )
+    return existing, False
+
+
+class RetentionNotConfirmedError(RuntimeError):
+    """Retention could not be confirmed. Raised so the handler never reports success without a durable
+    row: the poller then leaves the IMAP message Unseen and the next poll retries it."""
+
+
+def _retained_row_exists(db: Session, *, mailbox_id: int, identity: str, organization_id: str) -> bool:
+    """True only if a row with this EXACT identity -- (mailbox_id, message_id_header) and the same
+    organization -- exists in the current transaction's view."""
+    return (
+        db.query(UnmatchedInboundMessage.id)
+        .filter(
+            UnmatchedInboundMessage.mailbox_id == mailbox_id,
+            UnmatchedInboundMessage.message_id_header == identity,
+            UnmatchedInboundMessage.organization_id == organization_id,
+        )
+        .first()
+        is not None
+    )
+
+
+def _retain_unmatched(
+    db: Session,
+    email_in: InboundEmail,
+    *,
+    identity: str,
+    mailbox_id: int,
+    organization_id: str,
+    reason: str,
+) -> None:
+    """
+    Persist one unmatched/ambiguous mailbox message so it can be marked Seen without being lost.
+
+    Returns only when a row with this exact (mailbox_id, identity, organization) exists in the caller's
+    transaction; in every other case it raises, so a retention failure can never look like success.
+
+    The insert is ``INSERT ... ON CONFLICT (mailbox_id, message_id_header) DO NOTHING``. That clause
+    absorbs exactly one thing -- a uniqueness conflict on that one key, i.e. the message is already
+    retained (re-offered after a failed Seen, an operator re-offer, or a concurrent poll). Every other
+    constraint failure (NOT NULL, foreign key, a different unique key, a check) is NOT absorbed: it
+    raises IntegrityError out of this function, nothing is rolled back or hidden here, and the caller
+    rolls the transaction back. Nothing is caught: no exception is used for control flow, and no
+    rollback of the caller's transaction is ever issued from here.
+
+    After the insert the row is CONFIRMED to exist (``_retained_row_exists``) whether it was inserted or
+    the insert was a no-op. A conflict whose row is not visible or does not match the exact identity
+    (for example under REPEATABLE READ, or a row recorded for another organization) is not accepted as a
+    duplicate: it raises RetentionNotConfirmedError. ``organization_id`` / ``mailbox_id`` are the polled
+    Mailbox's, never the message's. Nothing is attached to a contact and ``messages`` is not touched.
+    This function never commits (the caller does, before the IMAP Seen flag).
+
+    Only PostgreSQL and SQLite are supported (see _dialect_insert); any other fails closed rather than
+    falling back to a broader exception handler.
+    """
+    stmt = (
+        _dialect_insert(db)(UnmatchedInboundMessage)
+        .values(
+            mailbox_id=mailbox_id,
+            organization_id=organization_id,
+            message_id_header=identity,
+            reason=reason,
+            from_email=email_in.from_email,
+            subject=email_in.subject,
+            body=email_in.body_text,
+            in_reply_to_header=email_in.in_reply_to,
+            references_header=" ".join(email_in.references) if email_in.references else None,
+        )
+        .on_conflict_do_nothing(index_elements=["mailbox_id", "message_id_header"])
+    )
+    inserted = db.execute(stmt).rowcount == 1
+
+    if not _retained_row_exists(db, mailbox_id=mailbox_id, identity=identity, organization_id=organization_id):
+        raise RetentionNotConfirmedError(
+            f"mailbox {mailbox_id}: no retained row with the exact identity exists after the insert"
+        )
+    if not inserted:
+        logger.info("Inbound for mailbox %s already retained (confirmed existing row); not stored twice", mailbox_id)
 
 
 def _correlate_mailbox_inbound(

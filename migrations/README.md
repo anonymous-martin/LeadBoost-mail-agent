@@ -160,6 +160,18 @@ work-queue indexes.
     business data. Code from before PR4 ignores these tables, so rolling the
     *code* back does not require the downgrade.
 
+13. `011_unmatched_inbound_messages.py` -- creates `unmatched_inbound_messages`, the
+    durable holding area for mailbox-polled inbound mail that could not be attached
+    to exactly one contact (`no_match` / `ambiguous`). Before this, such mail was not
+    stored and the IMAP message was still marked Seen, so it survived only on the
+    provider side. The row is now committed before Seen is set. Additive: one new
+    table (unique on `mailbox_id, message_id_header`; `mailbox_id` -> `mailboxes.id`
+    ON DELETE RESTRICT); same `__table__.create(checkfirst=True)` pattern as 006, so it
+    coexists with `init_db()`. Nothing existing reads it. `--downgrade` DROPS the table and
+    every retained message -- those may exist nowhere else, so export unresolved rows first
+    (`SELECT * FROM unmatched_inbound_messages WHERE resolved_at IS NULL`). Code from before
+    this change ignores the table, so rolling the *code* back does not require the downgrade.
+
 **Wrapper evidence.** The guarded wrapper `scripts/migrate_release.sh` (with `--status` and `--check-only`) is covered in CI against a disposable PostgreSQL by `tests/test_migrate_release.py`. At the time of that observation the canonical sequence had 11 steps; it has also been run against the dedicated Supabase database: all 11 steps completed and the final `--status` reported the expected markers present (operator-reported). Migration 010 (PR4) has NOT been run against that database -- applying it is an operator-controlled release step. A code deployment and a migration are separate release actions: the wrapper is never run by startup or by every deploy.
 
 **Startup race (fixed in code).** `init_db()` (create-missing-tables) runs at API and worker start in the default `SCHEMA_INIT_MODE=create`. Two processes starting together against an empty database produced a duplicate-sequence error once on hosted infrastructure. `init_db()` now takes a transaction-scoped PostgreSQL advisory lock, so concurrent callers queue and later ones find the tables already present; this was reproduced and fixed on disposable PostgreSQL (`tests/test_schema_init.py`), not re-observed on hosted infrastructure. Still run the wrapper before the first start of a new database: it remains the source of truth, because `init_db()` creates tables only and applies none of the canonical constraints/indexes. A deployed service can set `SCHEMA_INIT_MODE=verify` so it runs no DDL at all; `python scripts/migrate_preflight.py verify` is the read-only dry run of that check.
@@ -219,7 +231,7 @@ release step, **before** deploying code that needs the new schema.
 7. Deploy the new API and worker revision together, then resume the worker.
 
 A database that has only had `init_db()` (the services run it at every start) is **not**
-migrated; the wrapper always runs `init_db()` and then the 12 steps, in order.
+migrated; the wrapper always runs `init_db()` and then the 13 steps, in order.
 
 The tool refuses a missing/SQLite/non-PostgreSQL URL, an unacknowledged apply,
 and (migration 007) an upgrade that would strand non-terminal dispatches. It
@@ -247,12 +259,14 @@ python migrations/007_external_dispatch_mailbox.py
 python migrations/008_external_dispatch_deferred_message.py
 python migrations/009_messages_mailbox_scoped_dedupe.py
 python migrations/010_worker_runtime_status.py
+python migrations/011_unmatched_inbound_messages.py
 ```
 
 To revert 005 only: `python migrations/005_external_dispatch_grounding_context.py --downgrade`.
 To revert 006 only (destroys all mailbox records/credentials): `python migrations/006_mailboxes.py --downgrade`.
 To revert 007 / 008 / 009: `--downgrade` on each (008 refuses while any dispatch has `message_id` NULL; 009 refuses if a Message-ID is now stored more than once).
 To revert 010 (drops operator telemetry only -- two status tables and one index; no business data): `python migrations/010_worker_runtime_status.py --downgrade`.
+To revert 011 (DESTROYS every retained unmatched/ambiguous message -- export unresolved rows first): `python migrations/011_unmatched_inbound_messages.py --downgrade`.
 
 Safe to re-run the whole sequence any time; every step no-ops on columns/
 indexes/constraints that already exist.

@@ -333,9 +333,10 @@ INBOUND_DEFINITIONS = {
         "again and counted again as a duplicate."
     ),
     "unmatched_and_ambiguous": (
-        "Unmatched and ambiguous mail is deliberately NOT stored as a Message row. Only the aggregate "
-        "counters in the cycle snapshots record it (per process lifetime), so there is no durable "
-        "historical total for it, and persisted Message rows must not be read as 'emails received'."
+        "Unmatched and ambiguous mail is deliberately NOT stored as a Message row. Mailbox-polled mail of "
+        "this kind is retained, unattached to any contact, in unmatched_inbound_messages; the aggregate "
+        "counters in the cycle snapshots (per process lifetime) are the only trace of webhook and legacy "
+        "mail of this kind, and persisted Message rows must not be read as 'emails received'."
     ),
     "persisted_inbound_messages": (
         "Inbound Message ROWS created in the window, from every channel (mailbox polling, webhook, "

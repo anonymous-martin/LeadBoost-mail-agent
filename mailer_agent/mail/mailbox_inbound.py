@@ -103,7 +103,8 @@ class MailboxPollOutcome:
     # returns -- i.e. after its COMMIT and before the Seen flag. So these are handler outcomes, not
     # a count of distinct emails: a message whose Seen flag then fails to store is offered again
     # next poll and counted again, as a duplicate. Unmatched/ambiguous mail is deliberately NOT
-    # persisted as a Message row; this tally is the only (aggregate, address-free) trace of it.
+    # persisted as a Message row; it is retained in unmatched_inbound_messages, and this tally is
+    # its aggregate, address-free count.
     handled: dict[str, int] = field(default_factory=dict)
     classification_succeeded: int = 0  # persisted messages whose handler result said success
     classification_failed: int = 0     # persisted messages whose handler result said failure

@@ -139,11 +139,25 @@ Time comparisons assume the worker and API hosts' clocks agree to within a few s
   recorded. It includes every channel (mailbox polling, webhook, legacy poll).
 
 **Persisted rows are not "emails received".** Unmatched and ambiguous mail is deliberately *not* stored as a
-`Message`; duplicates are not stored twice. The handled counters are the only trace of that mail, and they
-are per process lifetime — there is no durable historical total for unpersisted mail. The handled counters are
+`Message`; duplicates are not stored twice. Mailbox-polled unmatched/ambiguous mail is instead retained,
+unattached to any contact, in `unmatched_inbound_messages` (one row per mailbox and Message-ID, with its reason and
+`resolved_at`), committed before the message is marked Seen; the handled counters remain only per-process
+aggregates, and mail from the webhook and legacy global-IMAP paths still leaves no durable trace. The handled counters are
 counted when the handler returns (after its commit, before the message is marked Seen) and are **handler
 outcomes, not distinct emails**: a message whose Seen flag fails to store is offered again and counted again,
 as a duplicate. The "mark Seen only after the handler returns" behavior is unchanged.
+
+There is deliberately no API or UI for the retained rows; read them with SQL (metadata first, bodies only when needed):
+
+```sql
+SELECT id, organization_id, mailbox_id, reason, created_at, resolved_at, length(body) AS body_chars
+FROM unmatched_inbound_messages WHERE resolved_at IS NULL ORDER BY created_at;
+```
+
+The table is never pruned automatically: rows (which hold third-party sender addresses, subjects and bodies) stay until
+an operator deletes them. A retention period and a purge procedure are a production decision this change does not make.
+To re-offer a retained message after fixing the cause, mark it Unseen at the mail provider; the next poll attaches it and
+sets `resolved_at`.
 
 ## Privacy and cardinality
 

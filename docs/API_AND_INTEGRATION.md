@@ -105,7 +105,7 @@ Accepted, queued, claimed, SMTP attempted, SMTP accepted and recipient receipt a
 - **IMAP (preferred).** A mailbox with IMAP configured is polled by the worker; the mailbox fixes the organization. LeadBoost sees replies as inbound messages in the conversation endpoint.
 - **Webhook (optional).** `POST /webhooks/inbound-email` with a tenant key lets an inbound-parse provider post replies. The organization comes from the key, not the payload.
 
-Mail that cannot be matched to a contact in that organization is not stored (see [SYSTEM_DESIGN.md](architecture/SYSTEM_DESIGN.md#9-reply-ingestion-mailbox-ownership-and-deduplication)).
+Mail polled through a mailbox that cannot be matched to exactly one contact in that organization is never attached to a contact and never appears in a conversation; it is retained separately for operator review (`unmatched_inbound_messages`). The webhook and legacy paths do not retain it (see [SYSTEM_DESIGN.md](architecture/SYSTEM_DESIGN.md#9-reply-ingestion-mailbox-ownership-and-deduplication)).
 
 ## 7. Health and diagnostics
 
