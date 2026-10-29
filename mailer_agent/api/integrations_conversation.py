@@ -208,6 +208,7 @@ def get_leadboost_outreach_conversation(
 
     rows = (
         db.query(
+            Message.id.label("message_pk"),
             Message.direction,
             Message.message_type,
             Message.subject,
@@ -289,6 +290,7 @@ def get_leadboost_outreach_conversation(
                 mailbox_reference=(
                     r.outbound_mailbox_reference if outbound else r.inbound_mailbox_reference
                 ),
+                message_reference=None if outbound else str(r.message_pk),
             )
         )
 

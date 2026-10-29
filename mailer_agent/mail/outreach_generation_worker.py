@@ -63,7 +63,7 @@ from mailer_agent.followup.work_claiming import (
 from mailer_agent.llm.agent import draft_message
 from mailer_agent.mail.exact_message import create_authorized_message
 from mailer_agent.mail.external_dispatch_worker import DispatchRuntime, default_runtime
-from mailer_agent.models import Campaign, Contact, ExternalDispatch
+from mailer_agent.models import Campaign, Contact, ExternalDispatch, MessageType
 from mailer_agent.worker_status import CycleReport
 
 logger = logging.getLogger("mailer_agent.mail.outreach_generation_worker")
@@ -97,10 +97,32 @@ class _Prepared:
     recipient_name: Optional[str]
     recipient_title: Optional[str]
     recipient_company: Optional[str]
+    # Threading facts snapshotted at acceptance for a reply (None -> initial outreach).
+    reply_parent: Optional[dict] = None
 
 
 class _Refusal(Exception):
     """A deterministic pre-LLM refusal. Becomes FAILED; the LLM is never called."""
+
+
+_REPLY_OBJECTIVE = (
+    "Reply to the prospect's most recent message in this conversation. Answer only what they "
+    "wrote, using verified facts. Do not state or imply that any meeting time is booked, "
+    "available or confirmed; if they proposed times, acknowledge them and say the sender will "
+    "confirm."
+)
+
+
+def _valid_reply_parent(value) -> Optional[dict]:
+    """None for an absent snapshot; a refusal (never a silent downgrade to initial outreach)
+    for a present but malformed one."""
+    if value is None:
+        return None
+    if not (isinstance(value, dict) and isinstance(value.get("message_id"), int)
+            and isinstance(value.get("subject"), str) and value["subject"]
+            and isinstance(value.get("in_reply_to_header"), str) and value["in_reply_to_header"]):
+        raise _Refusal("generation_context_invalid: reply parent snapshot is malformed")
+    return value
 
 
 def _default_session_factory() -> SessionFactory:
@@ -153,6 +175,7 @@ def _prepare(db: Session, claim: ClaimedDispatch) -> _Prepared:
         recipient_name=recipient.get("name"),
         recipient_title=recipient.get("title"),
         recipient_company=recipient.get("company"),
+        reply_parent=_valid_reply_parent(snap.get("reply_parent")),
     )
 
 
@@ -210,8 +233,9 @@ def _generate(prepared: _Prepared):
         draft = draft_message(
             campaign=gen_campaign,
             contact=gen_contact,
-            action_type="initial_outreach",
+            action_type="reply" if prepared.reply_parent else "initial_outreach",
             context_transcript=prepared.transcript,
+            **({"planner_objective": _REPLY_OBJECTIVE} if prepared.reply_parent else {}),
         )
     except Exception as exc:  # noqa: BLE001 -- provider outage etc.; nothing was queued for send
         logger.exception("external_dispatch generation failed dispatch_id=%d", prepared.claim.dispatch_id)
@@ -238,6 +262,13 @@ def _transaction_g2(factory: SessionFactory, prepared: _Prepared, draft, failure
                 message = create_authorized_message(
                     contact_id=prepared.contact_id, subject=draft.subject, body=draft.body
                 )
+                if prepared.reply_parent:
+                    # Subject and threading are protocol facts from the stored parent, never the model's.
+                    p = prepared.reply_parent
+                    message.message_type = MessageType.REPLY.value
+                    message.subject = p["subject"]
+                    message.in_reply_to_header = p["in_reply_to_header"]
+                    message.references_header = p.get("references_header")
                 db.add(message)
                 db.flush()
                 won = complete_generation(db, claim, message.id)

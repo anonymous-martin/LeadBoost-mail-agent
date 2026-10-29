@@ -15,6 +15,7 @@ api.deps._KEY_MAP and use the REAL dependencies.
 
 from __future__ import annotations
 
+import json
 import ast
 import os
 from datetime import datetime, timedelta, timezone
@@ -60,6 +61,7 @@ ACTION_KEYS = {"accepted", "state", "mailing_agent_reference", "created_at", "up
 MESSAGE_KEYS = {
     "direction", "message_type", "subject", "body", "body_truncated", "created_at",
     "delivery_state", "mailing_agent_reference", "mailbox_reference",
+    "message_reference",   # inbound messages only: the reply-parent reference (C9.4)
 }
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -599,7 +601,14 @@ def test_response_exposes_no_ids_headers_diagnostics_intent_or_secrets(client, d
 
     r = client.get(url("k1"))
     assert r.status_code == 200
-    text = r.text
+    body = r.json()
+    # C9.4: the ONE intentional reference on an inbound message -- exposed so LeadBoost can
+    # answer it. Asserted explicitly, then removed from the scan: it is a decimal string and
+    # would otherwise collide with the numeric secret fragments below (e.g. "535").
+    assert [m.get("message_reference") for m in body["messages"] if m["direction"] == "inbound"] == [str(inbound.id)]
+    for m in body["messages"]:
+        m.pop("message_reference", None)
+    text = json.dumps(body)
     for forbidden in (
         "hunter2", "Traceback", "AUTH PLAIN", "SMTPAuthenticationError", "535", "worker-host-42", ORG_A,
         "corr-LEAK", "481-LEAK", "GROUNDING-SENTINEL", "SEMANTIC-SENTINEL", "CLASSIFIER-REASON-SENTINEL",
@@ -611,7 +620,6 @@ def test_response_exposes_no_ids_headers_diagnostics_intent_or_secrets(client, d
         "semantic_analysis", "in_reply_to", "references", "idempotency",
     ):
         assert forbidden not in text, forbidden
-    body = r.json()
     assert "id" not in body and all("id" not in m for m in body["messages"])
     assert inbound.id not in {v for m in body["messages"] for v in m.values() if isinstance(v, int)}
 

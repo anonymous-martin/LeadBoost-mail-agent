@@ -78,11 +78,23 @@ from mailer_agent.api.deps import get_integration_org_id, require_api_key
 from mailer_agent.api.integrations import (
     _get_or_create_integration_campaign,
     _get_or_create_integration_contact,
+    _reject_if_contact_has_active_followup,
     _resolve_sole_active_mailbox,
 )
 from mailer_agent.db import get_db
+from mailer_agent.mail.imap_reader import as_reply_subject, is_synthetic_id
+from mailer_agent.mail.reply_handler_v2 import _build_references_header
 from mailer_agent.memory.store import build_conversation_context
-from mailer_agent.models import ExternalDispatch, ExternalDispatchState
+from mailer_agent.models import (
+    Campaign,
+    Contact,
+    ExternalDispatch,
+    ExternalDispatchState,
+    Mailbox,
+    Message,
+    MessageDirection,
+    campaign_is_integration_managed,
+)
 from mailer_agent.schemas import (
     LeadBoostOutreachActionAccepted,
     LeadBoostOutreachRequestIn,
@@ -104,7 +116,9 @@ _IDEMPOTENCY_CONFLICT_DETAIL = (
 )
 
 
-def _compute_generated_request_fingerprint(*, external_action_id: str, recipient_email: str) -> str:
+def _compute_generated_request_fingerprint(
+    *, external_action_id: str, recipient_email: str, reply_to_message_id: int | None = None
+) -> str:
     """
     SHA-256 over the canonical JSON of the operation's identity: which
     LeadBoost action, for which recipient. Stable across safe retries.
@@ -116,15 +130,16 @@ def _compute_generated_request_fingerprint(*, external_action_id: str, recipient
     these fingerprints disjoint from the exact-message route's, so a key
     first used there can never read as a replay here.
     """
-    canonical = json.dumps(
-        {
-            "kind": "leadboost.generated_outreach.v1",
-            "external_action_id": external_action_id,
-            "recipient_email": recipient_email,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    identity = {
+        "kind": "leadboost.generated_outreach.v1",
+        "external_action_id": external_action_id,
+        "recipient_email": recipient_email,
+    }
+    if reply_to_message_id is not None:
+        # Only present for a reply, so every pre-existing (non-reply) fingerprint is unchanged
+        # and a key first used for a plain request can never read as a replay of a reply.
+        identity["reply_to_message_id"] = reply_to_message_id
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -162,6 +177,62 @@ def _format_recipient_facts(facts: list[str]) -> str | None:
     return "\n".join(f"- {fact}" for fact in facts)
 
 
+def _resolve_reply_parent(
+    db: Session, org_id: str, message_reference: str, recipient_email: str
+) -> tuple[Message, Contact, Campaign]:
+    """
+    The stored inbound Message this reply answers, resolved with the tenant predicate in the
+    query itself: the message must be INBOUND, belong to a contact of this organization's
+    campaign, and have arrived through a Mailbox this organization owns (the same ownership
+    rule as the C9.3 conversation view -- webhook / legacy-poll mail has no provable owner).
+    Anything else -- unknown, another tenant's, outbound -- is an indistinguishable 404.
+
+    409 (nothing created) when the parent's contact is not an integration-managed contact, or
+    its address is not the recipient (a reply goes to the person who wrote, nobody else), or
+    it carries a native follow-up schedule (same rule as every other integration dispatch).
+    """
+    row = (
+        db.query(Message, Contact, Campaign)
+        .join(Contact, Message.contact_id == Contact.id)
+        .join(Campaign, Contact.campaign_id == Campaign.id)
+        .join(Mailbox, Message.mailbox_id == Mailbox.id)
+        .filter(
+            Message.id == int(message_reference),
+            Message.direction == MessageDirection.INBOUND.value,
+            Campaign.organization_id == org_id,
+            Mailbox.organization_id == org_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Reply parent message not found.")
+    parent, contact, campaign = row
+    if not campaign_is_integration_managed(campaign):
+        raise HTTPException(
+            status_code=409, detail="The parent message does not belong to a LeadBoost-managed contact."
+        )
+    if (contact.email or "").strip().lower() != recipient_email.strip().lower():
+        raise HTTPException(
+            status_code=409, detail="recipient does not match the sender of the parent message."
+        )
+    _reject_if_contact_has_active_followup(contact)
+    return parent, contact, campaign
+
+
+def _reply_parent_snapshot(parent: Message) -> dict:
+    """The deterministic threading facts, fixed at acceptance (grounding_context is write-once).
+    Subject and headers are protocol facts derived from the stored row -- never from the LLM."""
+    chain = parent.references_header.split() if parent.references_header else []
+    parent_mid = None if (not parent.message_id_header or is_synthetic_id(parent.message_id_header)) \
+        else parent.message_id_header
+    return {
+        "message_id": parent.id,
+        "subject": as_reply_subject(parent.subject),
+        "in_reply_to_header": parent_mid or parent.in_reply_to_header,
+        "references_header": _build_references_header(chain, parent.in_reply_to_header, parent_mid),
+    }
+
+
 @router.post(
     "/outreach-requests",
     response_model=LeadBoostOutreachActionAccepted,
@@ -189,8 +260,10 @@ def create_leadboost_generated_outreach(
        (organization_id, idempotency_key) constraint is the race backstop.
     """
     email = str(payload.recipient.email)
+    reply_to_id = int(payload.in_reply_to.message_reference) if payload.in_reply_to else None
     fingerprint = _compute_generated_request_fingerprint(
-        external_action_id=payload.external_action_id, recipient_email=email
+        external_action_id=payload.external_action_id, recipient_email=email,
+        reply_to_message_id=reply_to_id,
     )
 
     existing = _find_dispatch(db, org_id, payload.idempotency_key)
@@ -201,16 +274,41 @@ def create_leadboost_generated_outreach(
         )
         return _replay_or_conflict(existing, fingerprint)
 
+    # A reply's parent is resolved (404/409, nothing created) before any row is written.
+    reply_parent = None
+    if payload.in_reply_to is not None:
+        parent, parent_contact, parent_campaign = _resolve_reply_parent(
+            db, org_id, payload.in_reply_to.message_reference, email
+        )
+        reply_parent = _reply_parent_snapshot(parent)
+
     # No mailbox / ambiguous mailbox -> 409 before any row is created.
     mailbox_id = _resolve_sole_active_mailbox(db, org_id)
 
-    campaign = _get_or_create_integration_campaign(db, org_id)
-    contact = _get_or_create_integration_contact(db, campaign.id, email, payload.recipient.name)
+    if reply_parent is not None:
+        campaign, contact = parent_campaign, parent_contact      # the parent's own rows; nothing is created
+    else:
+        campaign = _get_or_create_integration_campaign(db, org_id)
+        contact = _get_or_create_integration_contact(db, campaign.id, email, payload.recipient.name)
     campaign_id, contact_id = campaign.id, contact.id
 
     # Mailer's own conversation history (new contact -> the first-contact
     # placeholder). A plain DB read; never caller-supplied.
     transcript = build_conversation_context(db, contact)
+
+    grounding = {
+        "version": GROUNDING_CONTEXT_VERSION,
+        "value_prop": payload.context.value_proposition,
+        "context_notes": _format_recipient_facts(payload.context.recipient_facts),
+        "conversation_transcript": transcript,
+        "recipient": {
+            "name": payload.recipient.name,
+            "title": payload.recipient.title,
+            "company": payload.recipient.company,
+        },
+    }
+    if reply_parent is not None:
+        grounding["reply_parent"] = reply_parent
 
     dispatch = ExternalDispatch(
         organization_id=org_id,
@@ -224,17 +322,7 @@ def create_leadboost_generated_outreach(
         request_fingerprint=fingerprint,
         public_reference=uuid.uuid4().hex,
         state=ExternalDispatchState.QUEUED.value,
-        grounding_context={
-            "version": GROUNDING_CONTEXT_VERSION,
-            "value_prop": payload.context.value_proposition,
-            "context_notes": _format_recipient_facts(payload.context.recipient_facts),
-            "conversation_transcript": transcript,
-            "recipient": {
-                "name": payload.recipient.name,
-                "title": payload.recipient.title,
-                "company": payload.recipient.company,
-            },
-        },
+        grounding_context=grounding,
     )
     db.add(dispatch)
 

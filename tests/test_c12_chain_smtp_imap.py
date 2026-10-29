@@ -105,6 +105,7 @@ MESSAGE_KEYS = {
     "delivery_state",
     "mailing_agent_reference",
     "mailbox_reference",
+    "message_reference",  # C9.4: inbound only; not opaque (the message row id)
 }
 
 
