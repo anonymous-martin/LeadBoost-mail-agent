@@ -259,9 +259,9 @@ class LeadBoostConversationMessage(BaseModel):
     mailing_agent_reference: str | None = None
     mailbox_reference: str | None = None
     # Inbound messages only: LeadBoost passes this back as ``in_reply_to.message_reference`` to
-    # answer THIS message. NOT opaque -- the decimal form of Message.id (documented exception to
-    # the view's no-internal-ids rule); resolution is tenant- and mailbox-scoped (404 otherwise).
-    message_reference: str | None = None
+    # answer THIS message. An OPAQUE token (Message.reply_reference: 32 lowercase hex characters,
+    # not derived from Message.id); every use is resolved tenant- and mailbox-scoped (404 otherwise).
+    message_reference: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
 class LeadBoostConversation(BaseModel):
@@ -320,13 +320,12 @@ class LeadBoostGenerationContextIn(BaseModel):
 class LeadBoostReplyParentIn(BaseModel):
     """The stored INBOUND message a reply answers. Only this reference is accepted: never a
     Message-ID/References header, subject or contact (Mailer derives all of those from its own
-    row, tenant-scoped). It is NOT opaque: the decimal form of Message.id, as exposed by the
-    conversation view's ``message_reference`` -- a deliberate, documented exception to the
-    view's no-internal-ids rule (see CONTRACT.md, C9.4)."""
+    row, tenant-scoped). It is the opaque ``message_reference`` of the conversation view
+    (Message.reply_reference, 32 lowercase hex characters) -- never a database id (CONTRACT.md, C9.4)."""
 
     model_config = _STRICT
 
-    message_reference: str = Field(..., pattern=r"^[1-9][0-9]{0,17}$")
+    message_reference: str = Field(..., pattern=r"^[0-9a-f]{32}$")
 
 
 class LeadBoostOutreachRequestIn(BaseModel):

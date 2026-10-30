@@ -82,7 +82,7 @@ from mailer_agent.api.integrations import (
     _resolve_sole_active_mailbox,
 )
 from mailer_agent.db import get_db
-from mailer_agent.mail.imap_reader import as_reply_subject, is_synthetic_id
+from mailer_agent.mail.imap_reader import _usable_message_id, as_reply_subject, is_synthetic_id
 from mailer_agent.mail.reply_handler_v2 import _build_references_header
 from mailer_agent.memory.store import build_conversation_context
 from mailer_agent.models import (
@@ -117,7 +117,7 @@ _IDEMPOTENCY_CONFLICT_DETAIL = (
 
 
 def _compute_generated_request_fingerprint(
-    *, external_action_id: str, recipient_email: str, reply_to_message_id: int | None = None
+    *, external_action_id: str, recipient_email: str, reply_to_message_reference: str | None = None
 ) -> str:
     """
     SHA-256 over the canonical JSON of the operation's identity: which
@@ -135,10 +135,11 @@ def _compute_generated_request_fingerprint(
         "external_action_id": external_action_id,
         "recipient_email": recipient_email,
     }
-    if reply_to_message_id is not None:
+    if reply_to_message_reference is not None:
         # Only present for a reply, so every pre-existing (non-reply) fingerprint is unchanged
-        # and a key first used for a plain request can never read as a replay of a reply.
-        identity["reply_to_message_id"] = reply_to_message_id
+        # and a key first used for a plain request can never read as a replay of a reply. The
+        # opaque public reference is what the caller sent, so it is what is bound (never a row id).
+        identity["reply_to_message_reference"] = reply_to_message_reference
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -197,7 +198,7 @@ def _resolve_reply_parent(
         .join(Campaign, Contact.campaign_id == Campaign.id)
         .join(Mailbox, Message.mailbox_id == Mailbox.id)
         .filter(
-            Message.id == int(message_reference),
+            Message.reply_reference == message_reference,
             Message.direction == MessageDirection.INBOUND.value,
             Campaign.organization_id == org_id,
             Mailbox.organization_id == org_id,
@@ -219,17 +220,36 @@ def _resolve_reply_parent(
     return parent, contact, campaign
 
 
+def _real_message_id(value: str | None) -> str | None:
+    """A Message-ID that may be written into an outgoing RFC header: present, well formed
+    (``_usable_message_id``) and NOT one of Mailer's own ``synthetic:`` dedupe identities, which are
+    storage keys for messages that had no Message-ID and mean nothing to a mail client."""
+    usable = _usable_message_id(value)
+    return None if usable is None or is_synthetic_id(usable) else usable
+
+
 def _reply_parent_snapshot(parent: Message) -> dict:
     """The deterministic threading facts, fixed at acceptance (grounding_context is write-once).
-    Subject and headers are protocol facts derived from the stored row -- never from the LLM."""
-    chain = parent.references_header.split() if parent.references_header else []
-    parent_mid = None if (not parent.message_id_header or is_synthetic_id(parent.message_id_header)) \
-        else parent.message_id_header
+    Subject and headers are protocol facts derived from the stored row -- never from the LLM.
+
+    409 (nothing created yet) when the parent offers nothing real to thread to: no usable
+    Message-ID of its own and no usable In-Reply-To of its own to fall back on. Accepting it would
+    queue a dispatch the generation worker can only refuse later. Synthetic identities are dropped
+    from every header, including each entry of the parent's own References chain."""
+    parent_mid = _real_message_id(parent.message_id_header)
+    parent_irt = _real_message_id(parent.in_reply_to_header)
+    thread_to = parent_mid or parent_irt
+    if thread_to is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The parent message has no usable Message-ID to thread a reply to.",
+        )
+    chain = [m for m in (parent.references_header or "").split() if _real_message_id(m)]
     return {
         "message_id": parent.id,
         "subject": as_reply_subject(parent.subject),
-        "in_reply_to_header": parent_mid or parent.in_reply_to_header,
-        "references_header": _build_references_header(chain, parent.in_reply_to_header, parent_mid),
+        "in_reply_to_header": thread_to,
+        "references_header": _build_references_header(chain, parent_irt, parent_mid),
     }
 
 
@@ -260,10 +280,10 @@ def create_leadboost_generated_outreach(
        (organization_id, idempotency_key) constraint is the race backstop.
     """
     email = str(payload.recipient.email)
-    reply_to_id = int(payload.in_reply_to.message_reference) if payload.in_reply_to else None
+    reply_ref = payload.in_reply_to.message_reference if payload.in_reply_to else None
     fingerprint = _compute_generated_request_fingerprint(
         external_action_id=payload.external_action_id, recipient_email=email,
-        reply_to_message_id=reply_to_id,
+        reply_to_message_reference=reply_ref,
     )
 
     existing = _find_dispatch(db, org_id, payload.idempotency_key)

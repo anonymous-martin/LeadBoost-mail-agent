@@ -71,6 +71,7 @@ STEPS=(
   "migrations/009_messages_mailbox_scoped_dedupe.py"
   "migrations/010_worker_runtime_status.py"
   "migrations/011_unmatched_inbound_messages.py"
+  "migrations/012_message_reply_reference.py"
 )
 
 if [ "$MODE" = status ]; then

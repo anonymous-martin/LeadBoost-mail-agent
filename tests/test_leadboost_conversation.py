@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import ast
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -603,9 +604,15 @@ def test_response_exposes_no_ids_headers_diagnostics_intent_or_secrets(client, d
     assert r.status_code == 200
     body = r.json()
     # C9.4: the ONE intentional reference on an inbound message -- exposed so LeadBoost can
-    # answer it. Asserted explicitly, then removed from the scan: it is a decimal string and
-    # would otherwise collide with the numeric secret fragments below (e.g. "535").
-    assert [m.get("message_reference") for m in body["messages"] if m["direction"] == "inbound"] == [str(inbound.id)]
+    # answer it. It is the persisted OPAQUE token (32 lowercase hex), never the row id. Asserted
+    # explicitly, then removed from the scan: a random hex string may by chance contain a short
+    # forbidden fragment below (e.g. "535"), and this one public token is allowed anyway. Every
+    # other leak assertion is unchanged.
+    inbound_refs = [m.get("message_reference") for m in body["messages"] if m["direction"] == "inbound"]
+    assert inbound_refs == [inbound.reply_reference]
+    assert re.fullmatch(r"[0-9a-f]{32}", inbound_refs[0])
+    assert inbound_refs[0] != str(inbound.id)
+    assert all(m.get("message_reference") is None for m in body["messages"] if m["direction"] == "outbound")
     for m in body["messages"]:
         m.pop("message_reference", None)
     text = json.dumps(body)

@@ -39,6 +39,7 @@ from mailer_agent.models import (
     SuppressionEntry,
     UnmatchedInboundMessage,
     contact_is_integration_managed,
+    new_reply_reference,
 )
 from mailer_agent.semantic.classifier import classify_prospect_reply
 from mailer_agent.semantic_models import IntentType, attach_fact_provenance, serialize_semantic_intent
@@ -223,6 +224,7 @@ def process_inbound_email_v2(db: Session, email_in: InboundEmail, *, organizatio
         message_id_header=email_in.message_id,
         in_reply_to_header=email_in.in_reply_to,
         references_header=" ".join(email_in.references) if email_in.references else None,
+        reply_reference=new_reply_reference(),
     )
     db.add(inbound_msg)
     try:
@@ -661,6 +663,9 @@ def _insert_correlated_message(
             message_id_header=identity,
             in_reply_to_header=email_in.in_reply_to,
             references_header=" ".join(email_in.references) if email_in.references else None,
+            # Core insert: set explicitly (not left to the column default) so this path can never
+            # produce a row without a public handle, whatever the dialect/statement shape.
+            reply_reference=new_reply_reference(),
         )
         .on_conflict_do_nothing(
             index_elements=["mailbox_id", "message_id_header"],
