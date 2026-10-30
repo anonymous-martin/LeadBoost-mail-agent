@@ -200,9 +200,10 @@ def test_full_canonical_sequence_on_empty_database_then_idempotent_rerun(disposa
 
     first = disposable_db.run()
     assert first.returncode == 0, _out(first)
-    assert "(11/13) migrations/009_messages_mailbox_scoped_dedupe.py" in _out(first)
-    assert "(12/13) migrations/010_worker_runtime_status.py" in _out(first)
-    assert "(13/13) migrations/011_unmatched_inbound_messages.py" in _out(first)
+    assert "(11/14) migrations/009_messages_mailbox_scoped_dedupe.py" in _out(first)
+    assert "(12/14) migrations/010_worker_runtime_status.py" in _out(first)
+    assert "(13/14) migrations/011_unmatched_inbound_messages.py" in _out(first)
+    assert "(14/14) migrations/012_message_reply_reference.py" in _out(first)
     assert "ABSENT" not in _out(first), "every schema marker must be present after the run"
 
     tables = disposable_db.tables()
@@ -212,6 +213,8 @@ def test_full_canonical_sequence_on_empty_database_then_idempotent_rerun(disposa
     assert "010  worker_runtime_status table" in _out(first)
     assert "unmatched_inbound_messages" in tables and "011  unmatched_inbound_messages table" in _out(first)
     assert "ix_messages_inbound_created_at" in _out(first)
+    assert "012  messages.reply_reference column" in _out(first)
+    assert "012  uq_messages_reply_reference" in _out(first)
     with disposable_db.engine.connect() as c:
         names = {i["name"] for i in inspect(c).get_indexes("messages")}
         names |= {u["name"] for u in inspect(c).get_unique_constraints("messages")}
@@ -222,6 +225,60 @@ def test_full_canonical_sequence_on_empty_database_then_idempotent_rerun(disposa
     assert second.returncode == 0, _out(second)
     assert "ABSENT" not in _out(second)
 
+
+@pytest.mark.integration
+@pytest.mark.postgres
+def test_migration_012_backfills_existing_rows_after_a_legacy_schema_upgrade(disposable_db):
+    """Simulate an existing database whose messages table predates reply_reference."""
+    assert disposable_db.run().returncode == 0
+    from sqlalchemy.orm import sessionmaker
+
+    from mailer_agent.models import Message
+    from tests.dispatch_support import seed_dispatch
+
+    with sessionmaker(bind=disposable_db.engine)() as session:
+        dispatch = seed_dispatch(session, state="sent")
+        outbound_id = dispatch.message_id
+        inbound = Message(
+            contact_id=dispatch.contact_id,
+            direction="inbound",
+            message_type=None,
+            subject="Re: Quick question",
+            body="Legacy inbound row for migration coverage.",
+            status="received",
+            mailbox_id=dispatch.mailbox_id,
+            message_id_header=f"<legacy-{uuid.uuid4().hex}@example.test>",
+        )
+        session.add(inbound)
+        session.commit()
+        inbound_id = inbound.id
+
+    # Recreate the schema shape seen by an installation that has not run migration 012.
+    with disposable_db.engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS uq_messages_reply_reference"))
+        conn.execute(text("ALTER TABLE messages DROP COLUMN reply_reference"))
+
+    first = disposable_db.run()
+    assert first.returncode == 0, _out(first)
+    assert "(14/14) migrations/012_message_reply_reference.py" in _out(first)
+    with disposable_db.engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT id, reply_reference FROM messages WHERE id IN (:outbound_id, :inbound_id) ORDER BY id"),
+            {"outbound_id": outbound_id, "inbound_id": inbound_id},
+        ).all()
+    assert len(rows) == 2
+    tokens = [row[1] for row in rows]
+    assert all(isinstance(token, str) and len(token) == 32 and all(c in "0123456789abcdef" for c in token) for token in tokens)
+    assert len(set(tokens)) == 2
+
+    second = disposable_db.run()
+    assert second.returncode == 0, _out(second)
+    with disposable_db.engine.connect() as conn:
+        after = dict(conn.execute(
+            text("SELECT id, reply_reference FROM messages WHERE id IN (:outbound_id, :inbound_id)"),
+            {"outbound_id": outbound_id, "inbound_id": inbound_id},
+        ).all())
+    assert after == {row[0]: row[1] for row in rows}, "rerunning migration 012 must preserve tokens"
 
 @pytest.mark.integration
 @pytest.mark.postgres

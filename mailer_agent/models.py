@@ -279,6 +279,16 @@ class Contact(Base):
     )
 
 
+def new_reply_reference() -> str:
+    """A fresh opaque public handle for a Message: 32 lowercase hex characters (128 random bits).
+
+    This -- never Message.id -- is what the LeadBoost conversation view hands out for an inbound
+    message and accepts back as ``in_reply_to.message_reference``. It carries no sequence, tenant or
+    time information, so it cannot be enumerated; every use is still resolved tenant- and
+    mailbox-scoped (api/integrations_generated.py::_resolve_reply_parent)."""
+    return uuid.uuid4().hex
+
+
 class Message(Base):
     __tablename__ = "messages"
 
@@ -317,6 +327,14 @@ class Message(Base):
     mailbox_id = Column(Integer, ForeignKey("mailboxes.id", ondelete="RESTRICT"), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    # Opaque public handle (see new_reply_reference). Generated once, at INSERT, and never rewritten, so a
+    # retry or re-read of the same row always shows the same token. Nullable at the database level ON PURPOSE:
+    # migration 012 backfills every existing row, but code from before this change (a rollback, or a worker
+    # that has not been restarted yet) inserts rows without it and must not fail; such a row simply has no
+    # public handle until the next 012 run backfills it. Uniqueness is a plain unique index (NULLs never
+    # collide on PostgreSQL or SQLite). Core ``insert(Message)`` paths set it explicitly as well.
+    reply_reference = Column(String(32), nullable=True, default=new_reply_reference)
 
     contact = relationship("Contact", back_populates="messages")
 
@@ -366,6 +384,9 @@ class Message(Base):
             postgresql_where=text("direction = 'inbound'"),
             sqlite_where=text("direction = 'inbound'"),
         ),
+        # Opaque reply handle: unique, looked up by equality on every reply request. Created for existing
+        # databases by migration 012 (after it backfills the column).
+        Index("uq_messages_reply_reference", "reply_reference", unique=True),
     )
 
 

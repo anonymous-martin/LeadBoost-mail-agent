@@ -15,8 +15,10 @@ api.deps._KEY_MAP and use the REAL dependencies.
 
 from __future__ import annotations
 
+import json
 import ast
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -60,6 +62,7 @@ ACTION_KEYS = {"accepted", "state", "mailing_agent_reference", "created_at", "up
 MESSAGE_KEYS = {
     "direction", "message_type", "subject", "body", "body_truncated", "created_at",
     "delivery_state", "mailing_agent_reference", "mailbox_reference",
+    "message_reference",   # inbound messages only: the reply-parent reference (C9.4)
 }
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -599,7 +602,20 @@ def test_response_exposes_no_ids_headers_diagnostics_intent_or_secrets(client, d
 
     r = client.get(url("k1"))
     assert r.status_code == 200
-    text = r.text
+    body = r.json()
+    # C9.4: the ONE intentional reference on an inbound message -- exposed so LeadBoost can
+    # answer it. It is the persisted OPAQUE token (32 lowercase hex), never the row id. Asserted
+    # explicitly, then removed from the scan: a random hex string may by chance contain a short
+    # forbidden fragment below (e.g. "535"), and this one public token is allowed anyway. Every
+    # other leak assertion is unchanged.
+    inbound_refs = [m.get("message_reference") for m in body["messages"] if m["direction"] == "inbound"]
+    assert inbound_refs == [inbound.reply_reference]
+    assert re.fullmatch(r"[0-9a-f]{32}", inbound_refs[0])
+    assert inbound_refs[0] != str(inbound.id)
+    assert all(m.get("message_reference") is None for m in body["messages"] if m["direction"] == "outbound")
+    for m in body["messages"]:
+        m.pop("message_reference", None)
+    text = json.dumps(body)
     for forbidden in (
         "hunter2", "Traceback", "AUTH PLAIN", "SMTPAuthenticationError", "535", "worker-host-42", ORG_A,
         "corr-LEAK", "481-LEAK", "GROUNDING-SENTINEL", "SEMANTIC-SENTINEL", "CLASSIFIER-REASON-SENTINEL",
@@ -611,7 +627,6 @@ def test_response_exposes_no_ids_headers_diagnostics_intent_or_secrets(client, d
         "semantic_analysis", "in_reply_to", "references", "idempotency",
     ):
         assert forbidden not in text, forbidden
-    body = r.json()
     assert "id" not in body and all("id" not in m for m in body["messages"])
     assert inbound.id not in {v for m in body["messages"] for v in m.values() if isinstance(v, int)}
 

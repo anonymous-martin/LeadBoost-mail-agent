@@ -39,6 +39,7 @@ from mailer_agent.models import (
     SuppressionEntry,
     UnmatchedInboundMessage,
     contact_is_integration_managed,
+    new_reply_reference,
 )
 from mailer_agent.semantic.classifier import classify_prospect_reply
 from mailer_agent.semantic_models import IntentType, attach_fact_provenance, serialize_semantic_intent
@@ -223,6 +224,7 @@ def process_inbound_email_v2(db: Session, email_in: InboundEmail, *, organizatio
         message_id_header=email_in.message_id,
         in_reply_to_header=email_in.in_reply_to,
         references_header=" ".join(email_in.references) if email_in.references else None,
+        reply_reference=new_reply_reference(),
     )
     db.add(inbound_msg)
     try:
@@ -269,6 +271,49 @@ def process_inbound_email_v2(db: Session, email_in: InboundEmail, *, organizatio
     # Steps 4-6 (classification, state transition, reply drafting, memory) are
     # shared with the mailbox-bound path -- see _classify_and_apply_inbound.
     return _classify_and_apply_inbound(db, email_in, contact, campaign, inbound_msg)
+
+
+def _advance_integration_contact(
+    db: Session, contact: Contact, event: StateTransitionEvent, *, reason: str
+) -> None:
+    """
+    Move a LeadBoost-managed contact through the EXISTING state machine after a reply.
+
+    Two facts made the previous single ``transition_contact_state(contact, event)`` call a
+    silent no-op for these contacts (``transition_contact_state`` returns False, logged at
+    debug level, for an edge that is not in STATE_TRANSITIONS):
+
+      * the external-dispatch worker never applies INITIAL_SENT, so the contact is still
+        ``new`` when its first reply arrives -- and ``new`` has no reply edge;
+      * ``active`` accepts only REPLY_RECEIVED, so POSITIVE_INTEREST / MEETING_REQUESTED
+        directly from ``active`` is not a legal edge either.
+
+    The table is not changed and ``status`` is never assigned directly. Instead only legal
+    edges are taken, in the order the table already defines:
+      1. ``new`` -> ``active`` via INITIAL_SENT, but only when an outbound message really
+         was SENT (a reply to something that never went out must not promote the contact);
+      2. the specific event; if the current state has no such edge, REPLY_RECEIVED
+         (-> ``replied``) and then the specific event.
+
+    Integration-only: the native branch is untouched. next_action_at is the caller's
+    business (pinned to None) -- nothing here schedules anything.
+    """
+    if contact.status == ContactStatus.NEW.value:
+        sent_outbound = (
+            db.query(Message.id)
+            .filter(
+                Message.contact_id == contact.id,
+                Message.direction == MessageDirection.OUTBOUND.value,
+                Message.status == MessageStatus.SENT.value,
+            )
+            .first()
+        )
+        if sent_outbound is not None:
+            transition_contact_state(contact, StateTransitionEvent.INITIAL_SENT, reason=reason)
+
+    if not transition_contact_state(contact, event, reason=reason):
+        if transition_contact_state(contact, StateTransitionEvent.REPLY_RECEIVED, reason=reason):
+            transition_contact_state(contact, event, reason=reason)
 
 
 def _classify_and_apply_inbound(
@@ -402,7 +447,9 @@ def _classify_and_apply_inbound(
             # contact. next_action_at is pinned to None so the contact can
             # never become native-scheduler-eligible. The bilateral reply
             # contract is C9.3.
-            transition_contact_state(contact, event, reason=f"Semantic: {intent.reasoning[:100]}")
+            _advance_integration_contact(
+                db, contact, event, reason=f"Semantic: {intent.reasoning[:100]}"
+            )
             contact.next_action_at = None
             result["action"] = "recorded_integration_managed"
 
@@ -616,6 +663,9 @@ def _insert_correlated_message(
             message_id_header=identity,
             in_reply_to_header=email_in.in_reply_to,
             references_header=" ".join(email_in.references) if email_in.references else None,
+            # Core insert: set explicitly (not left to the column default) so this path can never
+            # produce a row without a public handle, whatever the dialect/statement shape.
+            reply_reference=new_reply_reference(),
         )
         .on_conflict_do_nothing(
             index_elements=["mailbox_id", "message_id_header"],

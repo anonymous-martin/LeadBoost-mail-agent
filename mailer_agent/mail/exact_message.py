@@ -156,7 +156,9 @@ class ExactSendInput:
     (``campaign.sender_org`` as a subject) is an *invention* and is never
     used on this path. ``Message.subject`` itself is left as None.
 
-    No in_reply_to/references: this path produces new initial outreach.
+    In-Reply-To / References are carried ONLY for a message that was stored with a parent
+    (a LeadBoost-authorized reply, see api/integrations_generated.py); initial outreach has
+    none and its send kwargs are exactly what they were before.
     """
     to_email: str
     from_email: str
@@ -164,10 +166,12 @@ class ExactSendInput:
     subject: str
     body_text: str
     reply_to: str | None
+    in_reply_to_header: str | None = None
+    references_header: str | None = None
 
     def as_send_email_kwargs(self) -> dict:
         """Keyword arguments for ``mail.sender.send_email`` (its names)."""
-        return {
+        kwargs = {
             "to_email": self.to_email,
             "from_email": self.from_email,
             "from_name": self.from_name,
@@ -175,6 +179,11 @@ class ExactSendInput:
             "body_text": self.body_text,
             "reply_to": self.reply_to,
         }
+        if self.in_reply_to_header:
+            kwargs["in_reply_to_header"] = self.in_reply_to_header
+            if self.references_header:
+                kwargs["references_header"] = self.references_header
+        return kwargs
 
 
 def _assert_wired(message: Message, contact: Contact, campaign: Campaign) -> None:
@@ -209,6 +218,8 @@ def build_exact_send_input(
         subject=message.subject if message.subject is not None else "",
         body_text=message.body,
         reply_to=campaign.reply_to_email,
+        in_reply_to_header=message.in_reply_to_header,
+        references_header=message.references_header,
     )
 
 

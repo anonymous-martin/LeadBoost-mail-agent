@@ -258,6 +258,10 @@ class LeadBoostConversationMessage(BaseModel):
     delivery_state: _PublicDeliveryState | None = None
     mailing_agent_reference: str | None = None
     mailbox_reference: str | None = None
+    # Inbound messages only: LeadBoost passes this back as ``in_reply_to.message_reference`` to
+    # answer THIS message. An OPAQUE token (Message.reply_reference: 32 lowercase hex characters,
+    # not derived from Message.id); every use is resolved tenant- and mailbox-scoped (404 otherwise).
+    message_reference: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
 class LeadBoostConversation(BaseModel):
@@ -313,6 +317,17 @@ class LeadBoostGenerationContextIn(BaseModel):
     )
 
 
+class LeadBoostReplyParentIn(BaseModel):
+    """The stored INBOUND message a reply answers. Only this reference is accepted: never a
+    Message-ID/References header, subject or contact (Mailer derives all of those from its own
+    row, tenant-scoped). It is the opaque ``message_reference`` of the conversation view
+    (Message.reply_reference, 32 lowercase hex characters) -- never a database id (CONTRACT.md, C9.4)."""
+
+    model_config = _STRICT
+
+    message_reference: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+
+
 class LeadBoostOutreachRequestIn(BaseModel):
     model_config = _STRICT
 
@@ -324,6 +339,9 @@ class LeadBoostOutreachRequestIn(BaseModel):
     correlation_id: str | None = Field(default=None, max_length=255)
     recipient: LeadBoostGeneratedRecipientIn
     context: LeadBoostGenerationContextIn
+    # Optional: this operation is a reply to that stored inbound message (threaded, grounded
+    # on the real conversation). Absent -> new initial outreach, exactly as before.
+    in_reply_to: LeadBoostReplyParentIn | None = None
 
 
 # ---- Mailboxes (M1) --------------------------------------------------------

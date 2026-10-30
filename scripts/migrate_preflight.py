@@ -291,6 +291,10 @@ def _markers(conn):
          idx("messages", "ix_messages_inbound_created_at") and idx_valid("ix_messages_inbound_created_at")),
         ("011  unmatched_inbound_messages table (retained unmatched/ambiguous mailbox mail)",
          "unmatched_inbound_messages" in tables),
+        ("012  messages.reply_reference column (opaque public reply handle)",
+         col("messages", "reply_reference")),
+        ("012  uq_messages_reply_reference (UNIQUE; must be VALID)",
+         idx("messages", "uq_messages_reply_reference") and idx_valid("uq_messages_reply_reference")),
     ]
 
 

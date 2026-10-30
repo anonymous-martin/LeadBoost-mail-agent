@@ -67,6 +67,9 @@ snapshot (a worker finishing a dispatch mid-request can't produce a torn view).
 A snapshot read takes no row locks and cannot block FOR UPDATE SKIP LOCKED
 claims. SQLite has no equivalent and runs as-is.
 
+EXPOSED, inbound messages only: ``message_reference`` -- the opaque Message.reply_reference token
+(32 lowercase hex characters, not derived from any id) that LeadBoost passes back to reply.
+
 NOT EXPOSED: Message.id or any database id, RFC Message-ID / In-Reply-To /
 References (so synthetic ids never appear), error_message (raw diagnostics),
 detected_intent, semantic_analysis, grounding context, claim/lease fields,
@@ -208,6 +211,7 @@ def get_leadboost_outreach_conversation(
 
     rows = (
         db.query(
+            Message.reply_reference.label("reply_reference"),
             Message.direction,
             Message.message_type,
             Message.subject,
@@ -289,6 +293,7 @@ def get_leadboost_outreach_conversation(
                 mailbox_reference=(
                     r.outbound_mailbox_reference if outbound else r.inbound_mailbox_reference
                 ),
+                message_reference=None if outbound else r.reply_reference,
             )
         )
 
